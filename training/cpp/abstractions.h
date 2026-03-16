@@ -17,8 +17,11 @@ inline int board_pairedness(const int* board, int n) {
 inline int board_flush_pressure(const int* board, int n) {
     int sc[NUM_SUITS] = {};
     for (int i = 0; i < n; i++) sc[card_suit(board[i])]++;
-    int mx = 0; for (int s = 0; s < NUM_SUITS; s++) if (sc[s] > mx) mx = sc[s];
-    if (mx >= 4) return 2; if (mx >= 3) return 1; return 0;
+    int mx = 0;
+    for (int s = 0; s < NUM_SUITS; s++) if (sc[s] > mx) mx = sc[s];
+    if (mx >= 4) return 2;
+    if (mx >= 3) return 1;
+    return 0;
 }
 
 inline bool has_straight_potential(const bool rs[NUM_RANKS], int need) {
@@ -45,7 +48,8 @@ inline int board_straight_pressure(const int* board, int n) {
 inline int board_height(const int* board, int n) {
     bool ace = false; int mx = 0;
     for (int i = 0; i < n; i++) { int r = card_rank(board[i]); if (r == ACE_RANK) ace = true; if (r > mx) mx = r; }
-    if (ace) return 2; return (mx <= 4) ? 0 : 1;
+    if (ace) return 2;
+    return (mx <= 4) ? 0 : 1;
 }
 
 inline int board_connectivity(const int* board, int n) {
