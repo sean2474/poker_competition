@@ -361,10 +361,34 @@ class SimpleAgent:
         else: fracs = [0.10,0.20,0.30,0.40]
         cands = sorted(set(max(mn, min(mn+int(spread*f), mx)) for f in fracs))
         if len(cands) <= 1: return cands[0] if cands else mn
-        # EV: fold_freq × opp_bet + call_freq × sd × (stake+size)
+
+        # Quick equity (50 sims)
+        hand = self.my_hand_2 if self.my_hand_2 else []
+        community = [c for c in obs.get("community_cards", []) if c != -1]
+        eq = 0.5
+        if len(hand) == 2 and community:
+            evl = get_evaluator()
+            dead_set = set(hand) | set(community)
+            for c in self.my_discards:
+                if c >= 0: dead_set.add(c)
+            for c in self.opp_discards:
+                if c >= 0: dead_set.add(c)
+            rem = [c for c in ALL_CARDS if c not in dead_set]
+            bn = 5 - len(community)
+            if len(rem) >= bn + 2:
+                my_h = [int_to_treys(c) for c in hand]
+                w = t = 0
+                for _ in range(50):
+                    s = random.sample(rem, bn + 2)
+                    b = [int_to_treys(c) for c in community + s[:bn]]
+                    oh = [int_to_treys(c) for c in s[bn:]]
+                    if evl.evaluate(my_h, b) < evl.evaluate(oh, b): w += 1
+                    t += 1
+                eq = w / t if t > 0 else 0.5
+
+        sd = 2.0 * eq - 1.0
         stake = min(int(obs["my_bet"]), int(obs["opp_bet"]))
-        sd = 0.0  # neutral if no equity
-        best_ev, best = float('-inf'), cands[1]
+        best_ev, best = float('-inf'), cands[len(cands)//2]
         for sz in cands:
             ff = sz / (sz + pot) if (sz+pot) > 0 else 0.3
             ev = ff * int(obs["opp_bet"]) + (1-ff) * sd * (stake+sz)
