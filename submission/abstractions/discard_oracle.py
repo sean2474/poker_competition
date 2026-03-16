@@ -104,61 +104,37 @@ def _fast_score(keep: list, board_3: list) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Stage B: Detailed Monte Carlo evaluation
+# Exact hand strength enumeration
 # ═══════════════════════════════════════════════════════════════════
 
-def _mc_equity(keep: list, board_3: list, dead: list,
-               num_sims: int = 150) -> float:
+def _exact_hand_strength(keep: list, board_3: list, dead: list) -> float:
     """
-    Monte Carlo equity for a keep-pair against random opponent.
-    Rolls out turn + river + opponent 2 cards.
-    Returns win rate [0, 1].
+    Exact average hand rank by enumerating all (turn, river) runouts.
+    Lower rank = better hand in treys. Returns negative avg rank so
+    higher = better for comparison.
+
+    C(remaining, 2) = ~120-171 runouts → exact, no sampling.
     """
+    from itertools import combinations
     ev = get_evaluator()
     used = set(keep) | set(board_3) | set(dead)
     remaining = [c for c in ALL_CARDS if c not in used]
 
-    # Need: 2 more board cards + 2 opponent cards = 4
-    if len(remaining) < 4:
-        return 0.5
+    if len(remaining) < 2:
+        return 0.0
 
     my_h = [int_to_treys(c) for c in keep]
-    wins = 0
-    ties = 0
-    total = 0
+    total_rank = 0
+    count = 0
 
-    for _ in range(num_sims):
-        sample = random.sample(remaining, 4)
-        full_board = board_3 + sample[:2]
-        opp = sample[2:4]
+    for turn, river in combinations(remaining, 2):
+        b = [int_to_treys(c) for c in board_3 + [turn, river]]
+        rank = ev.evaluate(my_h, b)
+        total_rank += rank
+        count += 1
 
-        b = [int_to_treys(c) for c in full_board]
-        opp_h = [int_to_treys(c) for c in opp]
-
-        my_rank = ev.evaluate(my_h, b)
-        opp_rank = ev.evaluate(opp_h, b)
-        if my_rank < opp_rank:
-            wins += 1
-        elif my_rank == opp_rank:
-            ties += 1
-        total += 1
-
-    if total == 0:
-        return 0.5
-    return (wins + 0.5 * ties) / total
-
-
-def _composite_score(keep: list, board_3: list, dead: list,
-                     fast: float, mc_equity: float) -> float:
-    """
-    Combine fast heuristic and MC equity into final score.
-    Weights can be tuned.
-    """
-    # MC equity is the primary signal (range 0-1, scale to ~10)
-    # Fast score captures structural features MC might miss
-    w_mc = 0.7
-    w_fast = 0.3
-    return w_mc * (mc_equity * 10) + w_fast * fast
+    # Return negative avg rank (lower rank = better, so negate for "higher is better")
+    return -(total_rank / count) if count > 0 else 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -171,13 +147,7 @@ def choose_discard(hand_5: list, board_3: list,
                    mc_sims: int = 150) -> tuple:
     """
     Choose which 2 cards to keep from 5 hole cards.
-
-    Args:
-        hand_5: list of 5 card ints (our hole cards)
-        board_3: list of 3 card ints (flop community cards)
-        opp_discards: list of 3 card ints (opponent's discards, may be [-1,-1,-1])
-        top_k: number of candidates to evaluate in Stage B
-        mc_sims: Monte Carlo simulations per candidate in Stage B
+    Uses exact enumeration of all board runouts (no MC sampling).
 
     Returns:
         (keep_idx_0, keep_idx_1): indices into hand_5 of the 2 cards to keep
@@ -186,28 +156,16 @@ def choose_discard(hand_5: list, board_3: list,
     if opp_discards:
         dead = [c for c in opp_discards if c >= 0]
 
-    # Stage A: fast score all 10 candidates
-    candidates = []
+    best_score = float('-inf')
+    best_keep = (0, 1)
+
     for i, j in KEEP_PAIRS:
         keep = [hand_5[i], hand_5[j]]
         discarded = [hand_5[k] for k in range(5) if k != i and k != j]
-        fast = _fast_score(keep, board_3)
-        candidates.append((fast, i, j, keep, discarded))
-
-    # Sort by fast score descending, take top_k
-    candidates.sort(key=lambda x: -x[0])
-    top_candidates = candidates[:top_k]
-
-    # Stage B: MC evaluation of top candidates
-    best_score = -1.0
-    best_keep = (candidates[0][1], candidates[0][2])
-
-    for fast, i, j, keep, discarded in top_candidates:
         all_dead = dead + discarded
-        eq = _mc_equity(keep, board_3, all_dead, num_sims=mc_sims)
-        composite = _composite_score(keep, board_3, all_dead, fast, eq)
-        if composite > best_score:
-            best_score = composite
+        score = _exact_hand_strength(keep, board_3, all_dead)
+        if score > best_score:
+            best_score = score
             best_keep = (i, j)
 
     return best_keep

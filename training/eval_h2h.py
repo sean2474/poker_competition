@@ -86,19 +86,62 @@ def convert_bin(bin_path):
     return key_to_idx, probs, act_types, ACTION_LISTS, confidence, iters, nodes
 
 
-CONFIDENCE_THRESHOLD = 50.0
+CONFIDENCE_THRESHOLD = 300000000.0
+
+
+def _mc_choose_discard(hand_5, board_3, opp_discards=None, top_k=3, mc_sims=150):
+    """Old MC-based discard for comparison."""
+    from abstractions.discard_oracle import _fast_score, KEEP_PAIRS
+    dead = [c for c in (opp_discards or []) if c >= 0]
+
+    candidates = []
+    for i, j in KEEP_PAIRS:
+        keep = [hand_5[i], hand_5[j]]
+        discarded = [hand_5[k] for k in range(5) if k != i and k != j]
+        fast = _fast_score(keep, board_3)
+        candidates.append((fast, i, j, keep, discarded))
+    candidates.sort(key=lambda x: -x[0])
+
+    ev = get_evaluator()
+    best_score = -1.0
+    best_keep = (candidates[0][1], candidates[0][2])
+
+    for fast, i, j, keep, discarded in candidates[:top_k]:
+        all_dead = dead + discarded
+        used = set(keep) | set(board_3) | set(all_dead)
+        remaining = [c for c in ALL_CARDS if c not in used]
+        if len(remaining) < 4:
+            continue
+        my_h = [int_to_treys(c) for c in keep]
+        wins = ties = total = 0
+        for _ in range(mc_sims):
+            sample = random.sample(remaining, 4)
+            b = [int_to_treys(c) for c in board_3 + sample[:2]]
+            oh = [int_to_treys(c) for c in sample[2:4]]
+            mr = ev.evaluate(my_h, b)
+            opr = ev.evaluate(oh, b)
+            if mr < opr: wins += 1
+            elif mr == opr: ties += 1
+            total += 1
+        eq = (wins + 0.5*ties) / total if total > 0 else 0.5
+        score = 0.7 * (eq * 10) + 0.3 * fast
+        if score > best_score:
+            best_score = score
+            best_keep = (i, j)
+    return best_keep
 
 
 class SimpleAgent:
     """Lightweight agent that plays using a specific strategy table."""
 
-    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None):
+    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None, use_exact_discard=True):
         self.name = name
         self.key_to_idx = key_to_idx
         self.probs = probs
         self.act_types = act_types
         self.action_lists = action_lists
         self.confidence = confidence
+        self.use_exact_discard = use_exact_discard
         self.reset()
 
     def reset(self):
@@ -328,7 +371,10 @@ class SimpleAgent:
 
         if obs["valid_actions"][_DISCARD]:
             community = [c for c in obs["community_cards"] if c != -1]
-            ki, kj = choose_discard(my_cards, community, od, top_k=3, mc_sims=100)
+            if self.use_exact_discard:
+                ki, kj = choose_discard(my_cards, community, od)
+            else:
+                ki, kj = _mc_choose_discard(my_cards, community, od)
             self.my_hand_2 = [my_cards[ki], my_cards[kj]]
             self.my_discards = [my_cards[k] for k in range(5) if k != ki and k != kj]
             return (_DISCARD, 0, ki, kj)
@@ -401,8 +447,9 @@ def run_match(agent0, agent1, num_hands=1000):
 def main():
     parser = argparse.ArgumentParser(description="Head-to-head checkpoint evaluation")
     parser.add_argument("bin_a", help="First checkpoint binary")
-    parser.add_argument("bin_b", help="Second checkpoint binary")
+    parser.add_argument("bin_b", nargs="?", default=None, help="Second checkpoint (omit for self-compare)")
     parser.add_argument("--matches", type=int, default=5)
+    parser.add_argument("--self-compare", action="store_true", help="Compare exact vs MC discard on same checkpoint")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
@@ -410,6 +457,28 @@ def main():
     print(f"Loading {args.bin_a}...")
     kA, pA, atA, alA, cA, iA, nA = convert_bin(args.bin_a)
     print(f"  → {iA:,} iters, {nA:,} nodes, conf={'YES' if cA is not None else 'NO'}")
+
+    if args.self_compare:
+        # Same checkpoint, exact discard vs MC discard
+        nameA = "exact"
+        nameB = "mc"
+        print(f"\n=== Exact discard vs MC discard ({args.matches} matches) ===")
+
+        winsA = winsB = 0
+        for m in range(args.matches):
+            agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA, use_exact_discard=True)
+            agentB = SimpleAgent(nameB, kA, pA, atA, alA, cA, use_exact_discard=False)
+            reward = run_match(agentA, agentB, num_hands=1000)
+            winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
+            if reward > 0: winsA += 1
+            elif reward < 0: winsB += 1
+            print(f"  Match {m+1}: {winner} wins ({reward:+d})")
+        print(f"\nResult: exact={winsA}W  mc={winsB}W  TIE={args.matches-winsA-winsB}")
+        return
+
+    if args.bin_b is None:
+        print("Error: need bin_b or --self-compare")
+        return
 
     print(f"Loading {args.bin_b}...")
     kB, pB, atB, alB, cB, iB, nB = convert_bin(args.bin_b)
