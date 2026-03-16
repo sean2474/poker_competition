@@ -2,6 +2,9 @@ import os
 import sys
 import pickle
 import random
+import struct
+
+import numpy as np
 
 # Ensure abstractions/ is importable from both project root and submission/
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -10,15 +13,84 @@ from agents.agent import Agent
 from gym_env import PokerEnv
 
 from abstractions.discard_oracle import choose_discard
-from abstractions.infoset import build_infoset_key
 from abstractions.action_abs import (
     get_valid_abstract_actions, abstract_to_concrete,
-    concrete_to_abstract, action_to_short, get_action_context,
+    action_to_short, get_action_context,
 )
 from abstractions.hand_bucket import _made_tier_from_structure, _draw_tier
+from abstractions.card_utils import (
+    card_rank, card_suit, canonicalize_suits, ACE_RANK_IDX,
+)
+from abstractions.board_texture import board_bucket_for_street
+from abstractions.hand_bucket import hand_bucket_for_street
+from abstractions.opp_discard_bucket import opp_discard_bucket
+from abstractions.public_state import (
+    line_bucket, pressure_bucket, initiative_bucket_simple,
+)
 
 
-STRATEGY_PATH = os.path.join(os.path.dirname(__file__), "data", "strategy.pkl")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+STRATEGY_KEYS_PATH = os.path.join(DATA_DIR, "strategy_keys.npy")
+STRATEGY_PROBS_PATH = os.path.join(DATA_DIR, "strategy_probs.npy")
+STRATEGY_ACTTYPE_PATH = os.path.join(DATA_DIR, "strategy_acttype.npy")
+STRATEGY_META_PATH = os.path.join(DATA_DIR, "strategy_meta.pkl")
+STRATEGY_PKL_PATH = os.path.join(DATA_DIR, "strategy.pkl")
+
+# Action context encoding matching C++
+_CTX_MAP = {"no_bet": 0, "facing_bet": 1, "high_pressure": 2}
+
+
+# ─── FNV-1a hash (matches C++ cfr_engine.h exactly) ───
+def _fnv_hash(data: bytes) -> int:
+    h = 14695981039346656037
+    for b in data:
+        h ^= b
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def _make_preflop_key(hand5: list, is_bb: bool, street_history: str) -> int:
+    """Matches C++ make_preflop_key byte layout exactly."""
+    canon = canonicalize_suits(tuple(sorted(hand5)))
+    pos = 1 if is_bb else 0
+    line = line_bucket(street_history)
+    buf = bytearray()
+    buf.append(0)  # PF marker
+    buf.append(pos)
+    buf.append(line)
+    for c in canon:
+        buf.append(c)
+    return _fnv_hash(bytes(buf))
+
+
+def _make_postdiscard_key(street: int, hand2: list, community: list,
+                           opp_discards: list, is_bb: bool,
+                           hero_agg: bool, villain_agg: bool,
+                           street_history: str, my_bet: int, opp_bet: int,
+                           dead: list, action_ctx: str, n_actions: int) -> int:
+    """Matches C++ make_postdiscard_key byte layout exactly."""
+    pos = 1 if is_bb else 0
+    init = 1 if hero_agg else (2 if villain_agg else 0)
+    line = line_bucket(street_history)
+    press = pressure_bucket(my_bet, opp_bet)
+    board_bkt = board_bucket_for_street(community, street)
+    board3 = community[:3] if len(community) >= 3 else community
+    opp_disc_bkt = opp_discard_bucket(opp_discards, board3)
+    hand_bkt = hand_bucket_for_street(hand2, community, street, dead)
+    actx = _CTX_MAP.get(action_ctx, 0)
+
+    buf = bytearray()
+    buf.append(street)
+    buf.append(pos)
+    buf.append(init)
+    buf.append(line)
+    buf.append(press)
+    buf.extend(struct.pack('<H', board_bkt))  # uint16 little-endian
+    buf.append(opp_disc_bkt & 0xFF)
+    buf.append(hand_bkt & 0xFF)
+    buf.append(actx)
+    buf.append(n_actions)
+    return _fnv_hash(bytes(buf))
 
 # ActionType enum values
 _FOLD = 0
@@ -33,18 +105,12 @@ class PlayerAgent(Agent):
         super().__init__(stream)
         self.action_types = PokerEnv.ActionType
 
-        # Load CFR strategy table
-        self.strategy_data = None
-        if os.path.exists(STRATEGY_PATH):
-            try:
-                with open(STRATEGY_PATH, 'rb') as f:
-                    self.strategy_data = pickle.load(f)
-                self.logger.info(
-                    f"Loaded CFR strategy: {self.strategy_data['iterations']} iters, "
-                    f"{len(self.strategy_data['strategies'])} nodes"
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to load strategy: {e}")
+        # Strategy lookup tables
+        self.strategy_loaded = False
+        self.key_to_idx = None
+        self.probs = None
+        self.act_types = None
+        self.action_lists = None
 
         # Per-hand tracking
         self.current_hand = -1
@@ -56,6 +122,70 @@ class PlayerAgent(Agent):
         self.my_hand_2 = []
         self.my_discards = []
         self.opp_discards = []
+
+        self._load_strategy()
+
+    def _load_strategy(self):
+        """Load compressed numpy strategy or fall back to pickle."""
+        # Try compressed format first
+        if os.path.exists(STRATEGY_KEYS_PATH):
+            try:
+                keys = np.load(STRATEGY_KEYS_PATH)
+                self.probs = np.load(STRATEGY_PROBS_PATH)
+                self.act_types = np.load(STRATEGY_ACTTYPE_PATH)
+                with open(STRATEGY_META_PATH, 'rb') as f:
+                    meta = pickle.load(f)
+                self.action_lists = meta['action_lists']
+                # Build hash -> index lookup
+                self.key_to_idx = {}
+                for i in range(len(keys)):
+                    self.key_to_idx[int(keys[i])] = i
+                self.strategy_loaded = True
+                self.logger.info(
+                    f"Loaded compressed strategy: {meta['iterations']} iters, "
+                    f"{meta['num_nodes']} nodes"
+                )
+                return
+            except Exception as e:
+                self.logger.warning(f"Failed to load compressed strategy: {e}")
+
+        # Fallback: pickle format
+        if os.path.exists(STRATEGY_PKL_PATH):
+            try:
+                with open(STRATEGY_PKL_PATH, 'rb') as f:
+                    data = pickle.load(f)
+                # Convert to same lookup format
+                action_lists_map = {
+                    ('FOLD', 'CALL', 'JAM'): 0,
+                    ('FOLD', 'CALL'): 1,
+                    ('FOLD', 'CALL', 'RAISE_SMALL', 'RAISE_LARGE'): 2,
+                    ('CHECK', 'BET_SMALL', 'BET_LARGE'): 3,
+                    ('CHECK',): 4,
+                }
+                self.action_lists = [
+                    ('FOLD', 'CALL', 'JAM'),
+                    ('FOLD', 'CALL'),
+                    ('FOLD', 'CALL', 'RAISE_SMALL', 'RAISE_LARGE'),
+                    ('CHECK', 'BET_SMALL', 'BET_LARGE'),
+                    ('CHECK',),
+                ]
+                n = len(data['strategies'])
+                self.probs = np.zeros((n, 4), dtype=np.uint8)
+                self.act_types = np.zeros(n, dtype=np.uint8)
+                self.key_to_idx = {}
+                for i, (key, node) in enumerate(data['strategies'].items()):
+                    h = _hash_key(key)
+                    self.key_to_idx[h] = i
+                    al = tuple(node['actions'])
+                    self.act_types[i] = action_lists_map.get(al, 255)
+                    for j, p in enumerate(node['strategy']):
+                        self.probs[i, j] = max(0, min(255, int(round(p * 255))))
+                self.strategy_loaded = True
+                self.logger.info(
+                    f"Loaded pkl strategy: {data['iterations']} iters, {n} nodes"
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to load strategy: {e}")
 
     def __name__(self):
         return "PlayerAgent"
@@ -83,8 +213,8 @@ class PlayerAgent(Agent):
         return observation.get("blind_position", 0) == 1
 
     def _cfr_lookup(self, observation) -> tuple:
-        """Try CFR strategy lookup. Returns concrete action or None."""
-        if not self.strategy_data:
+        """Try CFR strategy lookup using C++-compatible FNV-1a keys."""
+        if not self.strategy_loaded:
             return None
 
         my_cards = [c for c in observation["my_cards"] if c != -1]
@@ -92,13 +222,6 @@ class PlayerAgent(Agent):
         is_bb = self._is_bb(observation)
         street = observation["street"]
 
-        # Use stored 5-card hand for preflop, 2-card for post-discard
-        if street == 0:
-            hand_for_key = self.my_hand_5 if self.my_hand_5 else my_cards
-        else:
-            hand_for_key = self.my_hand_2 if self.my_hand_2 else my_cards[:2]
-
-        # Get valid abstract actions
         valid = observation["valid_actions"]
         min_raise = observation["min_raise"]
         max_raise = observation["max_raise"]
@@ -106,44 +229,48 @@ class PlayerAgent(Agent):
         opp_bet = observation["opp_bet"]
         valid_abs = get_valid_abstract_actions(valid, my_bet, opp_bet, min_raise, max_raise)
         n = len(valid_abs)
-
-        # Build infoset key
         action_ctx = get_action_context(valid, my_bet, opp_bet, max_raise)
-        ctx_key = (action_ctx, n)
-        key = build_infoset_key(
-            observation, hand_for_key, is_bb,
-            self.hero_last_raiser, self.villain_last_raiser,
-            self.street_history,
-            self.my_discards, self.opp_discards,
-        )
-        # Append (action_ctx, num_actions) to disambiguate decision contexts
-        key = key + (ctx_key,)
 
-        if key not in self.strategy_data['strategies']:
+        # Build key using C++-compatible FNV-1a hash
+        if street == 0:
+            hand5 = self.my_hand_5 if self.my_hand_5 else my_cards
+            h = _make_preflop_key(hand5, is_bb, self.street_history)
+        else:
+            hand2 = self.my_hand_2 if self.my_hand_2 else my_cards[:2]
+            dead = list(self.my_discards) + list(self.opp_discards)
+            opp_disc = self.opp_discards if self.opp_discards else [-1, -1, -1]
+            h = _make_postdiscard_key(
+                street, hand2, community, opp_disc, is_bb,
+                self.hero_last_raiser, self.villain_last_raiser,
+                self.street_history, my_bet, opp_bet, dead,
+                action_ctx, n
+            )
+
+        idx = self.key_to_idx.get(h)
+        if idx is None:
             return None
 
-        node = self.strategy_data['strategies'][key]
-        stored_actions = node['actions']
-        strategy = node['strategy']
-
-        # Verify action list matches
+        # Verify action list type matches
+        stored_type = self.act_types[idx]
+        if stored_type >= len(self.action_lists):
+            return None
+        stored_actions = list(self.action_lists[stored_type])
         if len(stored_actions) != n or stored_actions != valid_abs:
             return None
 
-        # Sample from strategy
-        total = sum(strategy)
+        # Read quantized probs and dequantize
+        raw_probs = self.probs[idx, :n].astype(np.float32)
+        total = raw_probs.sum()
         if total > 0:
-            probs = [p / total for p in strategy]
+            probs = raw_probs / total
         else:
-            probs = [1.0 / n] * n
+            probs = np.ones(n, dtype=np.float32) / n
 
-        chosen_idx = random.choices(range(n), weights=probs, k=1)[0]
+        chosen_idx = random.choices(range(n), weights=probs.tolist(), k=1)[0]
         chosen_abs = valid_abs[chosen_idx]
 
-        # Convert to concrete
         concrete = abstract_to_concrete(chosen_abs, min_raise, max_raise, my_bet, opp_bet)
 
-        # Update history
         self.street_history += action_to_short(chosen_abs)
         if chosen_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
             self.hero_last_raiser = True

@@ -256,25 +256,30 @@ def turn_hand_bucket(hand_2: list, board_4: list, dead: list = None) -> int:
 
 def _river_made_tier(hand_2: list, board_5: list) -> int:
     """
-    Fine-grained river made tier (5 levels).
+    Fine-grained river made tier (5 levels). Structure-based, matches C++.
     0=air/bluff candidate, 1=bluff catcher (weak pair),
-    2=thin value (decent pair), 3=clear value (two pair/trips),
+    2=thin value (overpair/top pair), 3=clear value (two pair/trips),
     4=nutted (straight+)
     """
     ev = get_evaluator()
     h = [int_to_treys(c) for c in hand_2]
     b = [int_to_treys(c) for c in board_5]
     rank = ev.evaluate(h, b)
+    # treys: 1-10=SF, 167-322=FH, 323-1599=Flush, 1600-1609=Straight,
+    # 1610-2467=Trips, 2468-3325=TwoPair, 3326-6185=OnePair, 6186+=HC
     if rank <= 1609:
         return 4  # straight or better = nutted
-    if rank <= 2467:
-        return 3  # trips = clear value
     if rank <= 3325:
-        return 3  # two pair = clear value
-    if rank <= 4500:
-        return 2  # decent pair = thin value
+        return 3  # trips or two pair = clear value
     if rank <= 6185:
-        return 1  # weak pair = bluff catcher
+        # One pair: top pair / overpair = thin value, else bluff catcher
+        hand_ranks = [card_rank(c) for c in hand_2]
+        board_max = max(card_rank(c) for c in board_5)
+        overpair = hand_ranks[0] == hand_ranks[1] and hand_ranks[0] > board_max
+        top_pair = board_max in hand_ranks
+        if overpair or top_pair:
+            return 2
+        return 1
     return 0  # high card = air
 
 
