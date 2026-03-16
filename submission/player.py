@@ -295,9 +295,11 @@ class PlayerAgent(Agent):
         pot = my_bet + opp_bet
         pot_odds = to_call / (to_call + pot) if to_call > 0 and pot > 0 else 0
 
-        # ─── Compute MC equity ───
+        # ─── Compute MC equity (discard-aware) ───
         if len(hand) == 2 and community:
             from abstractions.card_utils import get_evaluator, int_to_treys, ALL_CARDS
+            from abstractions.discard_oracle import estimate_opp_keep_weights
+            from itertools import combinations
             ev = get_evaluator()
             dead_set = set(hand) | set(community)
             for c in self.my_discards:
@@ -306,18 +308,47 @@ class PlayerAgent(Agent):
                 if c >= 0: dead_set.add(c)
             remaining = [c for c in ALL_CARDS if c not in dead_set]
             board_need = 5 - len(community)
-            opp_need = 2
-            total_need = board_need + opp_need
+            total_need = board_need + 2
+
             if len(remaining) >= total_need:
                 my_h = [int_to_treys(c) for c in hand]
+
+                # Build weighted opponent range from their discards
+                opp_combos = list(combinations(remaining, 2))
+                board3 = community[:3] if len(community) >= 3 else community
+                opp_weights = None
+                if self.opp_discards and len(self.opp_discards) == 3 and all(c >= 0 for c in self.opp_discards):
+                    w_dict = estimate_opp_keep_weights(self.opp_discards, board3, remaining)
+                    if w_dict:
+                        opp_weights = [w_dict.get((c1, c2), 0.05) for c1, c2 in opp_combos]
+                        w_total = sum(opp_weights)
+                        if w_total > 0:
+                            opp_weights = [w / w_total for w in opp_weights]
+                        else:
+                            opp_weights = None
+
                 wins = ties = total = 0
                 import random as _rng
                 for _ in range(200):
-                    sample = _rng.sample(remaining, total_need)
-                    full_board = community + sample[:board_need]
-                    opp = sample[board_need:board_need + opp_need]
+                    # Pick opponent hand (weighted or uniform)
+                    if opp_weights:
+                        opp_idx = _rng.choices(range(len(opp_combos)), weights=opp_weights, k=1)[0]
+                        opp_pair = list(opp_combos[opp_idx])
+                    else:
+                        opp_pair = list(_rng.sample(remaining, 2))
+
+                    # Sample remaining board cards (excluding opp hand)
+                    if board_need > 0:
+                        board_remaining = [c for c in remaining if c not in opp_pair]
+                        if len(board_remaining) < board_need:
+                            continue
+                        extra = _rng.sample(board_remaining, board_need)
+                        full_board = community + extra
+                    else:
+                        full_board = community
+
                     b = [int_to_treys(c) for c in full_board]
-                    opp_h = [int_to_treys(c) for c in opp]
+                    opp_h = [int_to_treys(c) for c in opp_pair]
                     mr = ev.evaluate(my_h, b)
                     opr = ev.evaluate(opp_h, b)
                     if mr < opr: wins += 1

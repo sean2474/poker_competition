@@ -213,6 +213,50 @@ def choose_discard(hand_5: list, board_3: list,
     return best_keep
 
 
+def estimate_opp_keep_weights(opp_discards: list, board_3: list,
+                               remaining_cards: list) -> dict:
+    """
+    Estimate likelihood of each possible opponent keep-pair, given their 3 discards.
+
+    Logic: opponent's original 5 cards = keep(2) + discard(3).
+    For each possible 2-card combo from remaining_cards, check if that combo
+    would be the best keep from the hypothetical 5-card hand.
+
+    Returns: dict mapping (c1, c2) -> weight (higher = more likely kept)
+    """
+    from itertools import combinations
+
+    opp_disc = [c for c in opp_discards if c >= 0]
+    if len(opp_disc) != 3:
+        return {}
+
+    weights = {}
+    for c1, c2 in combinations(remaining_cards, 2):
+        # Hypothetical original 5 cards
+        original_5 = [c1, c2] + opp_disc
+        keep_pair = [c1, c2]
+        keep_score = _fast_score(keep_pair, board_3)
+
+        # Check all 10 possible keep pairs from this 5-card hand
+        is_best = True
+        for i in range(5):
+            for j in range(i + 1, 5):
+                alt_keep = [original_5[i], original_5[j]]
+                if alt_keep == keep_pair:
+                    continue
+                alt_score = _fast_score(alt_keep, board_3)
+                if alt_score > keep_score + 0.5:  # margin to account for noise
+                    is_best = False
+                    break
+            if not is_best:
+                break
+
+        # Weight: 1.0 if this was plausibly the best keep, 0.05 if not
+        weights[(c1, c2)] = 1.0 if is_best else 0.05
+
+    return weights
+
+
 def choose_discard_with_scores(hand_5: list, board_3: list,
                                 opp_discards: list = None,
                                 mc_sims: int = 100) -> list:

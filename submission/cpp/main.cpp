@@ -18,12 +18,14 @@ int main(int argc, char** argv) {
     const char* output = "strategy.bin";
     const char* checkpoint = "checkpoint.bin";
     bool resume = false;
+    int validate_every = 0;  // 0 = no intermediate saves
 
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--iterations") == 0 && i+1 < argc) iterations = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--output") == 0 && i+1 < argc) output = argv[++i];
         else if (std::strcmp(argv[i], "--checkpoint") == 0 && i+1 < argc) checkpoint = argv[++i];
         else if (std::strcmp(argv[i], "--resume") == 0) resume = true;
+        else if (std::strcmp(argv[i], "--validate-every") == 0 && i+1 < argc) validate_every = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
     }
 
@@ -51,6 +53,17 @@ int main(int argc, char** argv) {
                       << "  " << elapsed << "s  "
                       << trainer.nodes.size() << " nodes  "
                       << ips << " it/s" << std::endl;
+        }
+
+        // Periodic save for validation
+        if (validate_every > 0 && (i + 1) % validate_every == 0) {
+            std::cout << "\n--- Saving at iter " << trainer.iterations
+                      << " (" << trainer.nodes.size() << " nodes) ---" << std::endl;
+            trainer.save_binary(output);
+            trainer.save_checkpoint(checkpoint);
+            // Touch a signal file so the validation script knows to run
+            std::string signal = std::string(output) + ".ready";
+            std::ofstream(signal) << trainer.iterations << std::endl;
         }
     }
 
