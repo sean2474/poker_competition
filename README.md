@@ -50,3 +50,4 @@ python run.py
 ```
 
 You can modify which bots play by modifying the agent config file. Write the file path to the corresponding agent for that bot to play.
+# poker_competition
