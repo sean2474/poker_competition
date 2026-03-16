@@ -279,7 +279,7 @@ class PlayerAgent(Agent):
         return concrete
 
     def _fallback_action(self, observation) -> tuple:
-        """Deterministic fallback when CFR has no entry."""
+        """MC equity-based fallback when CFR has no entry."""
         valid = observation["valid_actions"]
         my_cards = [c for c in observation["my_cards"] if c != -1]
         community = [c for c in observation["community_cards"] if c != -1]
@@ -293,112 +293,83 @@ class PlayerAgent(Agent):
 
         to_call = opp_bet - my_bet
         pot = my_bet + opp_bet
+        pot_odds = to_call / (to_call + pot) if to_call > 0 and pot > 0 else 0
 
-        # ─── Preflop (no community cards): use raw card features ───
-        if not community or street == 0:
-            from abstractions.card_utils import card_rank, card_suit, ACE_RANK_IDX
+        # ─── Compute MC equity ───
+        if len(hand) == 2 and community:
+            from abstractions.card_utils import get_evaluator, int_to_treys, ALL_CARDS
+            ev = get_evaluator()
+            dead_set = set(hand) | set(community)
+            for c in self.my_discards:
+                if c >= 0: dead_set.add(c)
+            for c in self.opp_discards:
+                if c >= 0: dead_set.add(c)
+            remaining = [c for c in ALL_CARDS if c not in dead_set]
+            board_need = 5 - len(community)
+            opp_need = 2
+            total_need = board_need + opp_need
+            if len(remaining) >= total_need:
+                my_h = [int_to_treys(c) for c in hand]
+                wins = ties = total = 0
+                import random as _rng
+                for _ in range(200):
+                    sample = _rng.sample(remaining, total_need)
+                    full_board = community + sample[:board_need]
+                    opp = sample[board_need:board_need + opp_need]
+                    b = [int_to_treys(c) for c in full_board]
+                    opp_h = [int_to_treys(c) for c in opp]
+                    mr = ev.evaluate(my_h, b)
+                    opr = ev.evaluate(opp_h, b)
+                    if mr < opr: wins += 1
+                    elif mr == opr: ties += 1
+                    total += 1
+                equity = (wins + 0.5 * ties) / total if total > 0 else 0.5
+            else:
+                equity = 0.5
+        elif len(hand) == 2:
+            # Preflop with 2 cards: rough equity from card features
+            from abstractions.card_utils import ACE_RANK_IDX
+            r0, r1 = card_rank(hand[0]), card_rank(hand[1])
+            pp = (r0 == r1)
+            has_a = (r0 == ACE_RANK_IDX or r1 == ACE_RANK_IDX)
+            high = max(r0, r1)
+            equity = 0.3  # base
+            if pp: equity = 0.55 + high * 0.02
+            elif has_a: equity = 0.45 + min(r0, r1) * 0.02
+            else: equity = 0.25 + high * 0.03
+        else:
+            # Preflop 5 cards: rough score
+            from abstractions.card_utils import ACE_RANK_IDX
             ranks = sorted([card_rank(c) for c in my_cards], reverse=True)
-            has_pocket_pair = len(set(ranks)) < len(ranks)
-            has_ace = ACE_RANK_IDX in ranks
-            high = max(ranks)
-            # Preflop strength: rough score 0-4
-            pf_str = 0
-            if has_pocket_pair:
-                pf_str = 2
-                if high >= 5:   # pair of 7+
-                    pf_str = 3
-            elif has_ace:
-                pf_str = 2
-                if ranks[1] >= 5:  # Ace + 7+
-                    pf_str = 3
-            elif high >= 6:  # 8+
-                pf_str = 1
+            pp = len(set(ranks)) < len(ranks)
+            has_a = ACE_RANK_IDX in ranks
+            equity = 0.3
+            if pp: equity = 0.55
+            elif has_a: equity = 0.45
+            elif max(ranks) >= 6: equity = 0.35
 
-            if pf_str >= 3 and valid[_RAISE]:
-                amount = max(min_raise, min(pot, max_raise))
-                self.street_history += action_to_short("BET_LARGE")
+        # ─── Equity-based decision ───
+        def _act(action_str, action_type, raise_amt=0):
+            self.street_history += action_to_short(action_str)
+            if action_str in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
                 self.hero_last_raiser = True
                 self.villain_last_raiser = False
-                return (_RAISE, amount, 0, 0)
-            if pf_str >= 2:
-                if valid[_CALL]:
-                    self.street_history += action_to_short("CALL")
-                    return (_CALL, 0, 0, 0)
-                if valid[_RAISE]:
-                    amount = max(min_raise, min(pot // 2, max_raise))
-                    self.street_history += action_to_short("BET_SMALL")
-                    self.hero_last_raiser = True
-                    return (_RAISE, amount, 0, 0)
-            if pf_str >= 1:
-                if valid[_CHECK]:
-                    self.street_history += action_to_short("CHECK")
-                    return (_CHECK, 0, 0, 0)
-                if to_call <= 4 and valid[_CALL]:
-                    self.street_history += action_to_short("CALL")
-                    return (_CALL, 0, 0, 0)
-            if valid[_CHECK]:
-                self.street_history += action_to_short("CHECK")
-                return (_CHECK, 0, 0, 0)
-            self.street_history += action_to_short("FOLD")
-            return (_FOLD, 0, 0, 0)
+            return (action_type, raise_amt, 0, 0)
 
-        # ─── Post-flop: deterministic hand strength ───
-        made = _made_tier_from_structure(hand, community)
-        draw = _draw_tier(hand, community)
-
-        # Strong hand (two pair+): raise or call anything
-        if made >= 3:
-            if valid[_RAISE]:
-                amount = max(min_raise, min(pot, max_raise))
-                self.street_history += action_to_short("BET_LARGE")
-                self.hero_last_raiser = True
-                self.villain_last_raiser = False
-                return (_RAISE, amount, 0, 0)
-            if valid[_CALL]:
-                self.street_history += action_to_short("CALL")
-                return (_CALL, 0, 0, 0)
-
-        # Top pair / overpair: bet, or call even large bets
-        if made >= 2:
-            if to_call <= 0 and valid[_RAISE]:
-                amount = max(min_raise, min(pot // 2, max_raise))
-                self.street_history += action_to_short("BET_SMALL")
-                self.hero_last_raiser = True
-                self.villain_last_raiser = False
-                return (_RAISE, amount, 0, 0)
-            if valid[_CALL]:
-                self.street_history += action_to_short("CALL")
-                return (_CALL, 0, 0, 0)
-            if valid[_CHECK]:
-                self.street_history += action_to_short("CHECK")
-                return (_CHECK, 0, 0, 0)
-
-        # Draw: call if pot odds decent, check otherwise
-        if draw >= 2:
-            pot_odds = to_call / (to_call + pot) if to_call > 0 and pot > 0 else 0
-            if pot_odds < 0.35 and valid[_CALL]:
-                self.street_history += action_to_short("CALL")
-                return (_CALL, 0, 0, 0)
-            if valid[_CHECK]:
-                self.street_history += action_to_short("CHECK")
-                return (_CHECK, 0, 0, 0)
-
-        # Weak pair: check, or call small-to-medium bets
-        if made >= 1:
-            if valid[_CHECK]:
-                self.street_history += action_to_short("CHECK")
-                return (_CHECK, 0, 0, 0)
-            if to_call <= pot * 0.35 and valid[_CALL]:
-                self.street_history += action_to_short("CALL")
-                return (_CALL, 0, 0, 0)
-
-        # Air: check or fold
-        if valid[_CHECK]:
-            self.street_history += action_to_short("CHECK")
-            return (_CHECK, 0, 0, 0)
-
-        self.street_history += action_to_short("FOLD")
-        return (_FOLD, 0, 0, 0)
+        if equity > 0.75 and valid[_RAISE]:
+            amount = max(min_raise, min(int(pot * 0.75), max_raise))
+            return _act("BET_LARGE", _RAISE, amount)
+        elif equity > 0.55 and valid[_RAISE] and to_call <= 0:
+            amount = max(min_raise, min(int(pot * 0.5), max_raise))
+            return _act("BET_SMALL", _RAISE, amount)
+        elif equity >= pot_odds and equity > 0.35 and valid[_CALL]:
+            return _act("CALL", _CALL)
+        elif valid[_CHECK]:
+            return _act("CHECK", _CHECK)
+        elif equity >= pot_odds and valid[_CALL]:
+            return _act("CALL", _CALL)
+        else:
+            return _act("FOLD", _FOLD)
 
     def act(self, observation, reward, terminated, truncated, info):
         hand_number = info.get('hand_number', -1)

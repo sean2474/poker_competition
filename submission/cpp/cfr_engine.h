@@ -354,7 +354,7 @@ struct CFRNode {
 
     void init(int n, uint8_t atype) { num_actions = n; action_type = atype; }
 
-    void get_strategy(double out[MAX_ACTIONS], double reach_weight) {
+    void get_strategy(double out[MAX_ACTIONS], double reach_weight, int t) {
         double pos[MAX_ACTIONS], total = 0;
         for (int i = 0; i < num_actions; i++) {
             pos[i] = std::max(regret_sum[i], 0.0);
@@ -365,7 +365,9 @@ struct CFRNode {
         } else {
             for (int i = 0; i < num_actions; i++) out[i] = 1.0 / num_actions;
         }
-        for (int i = 0; i < num_actions; i++) strategy_sum[i] += reach_weight * out[i];
+        // Linear CFR: weight strategy_sum by iteration number
+        double weight = reach_weight * std::max(t, 1);
+        for (int i = 0; i < num_actions; i++) strategy_sum[i] += weight * out[i];
     }
 
     void get_average_strategy(double out[MAX_ACTIONS]) const {
@@ -464,7 +466,7 @@ struct CFRTrainer {
 
         double reach = (cp == 0) ? reach_0 : reach_1;
         double strategy[MAX_ACTIONS];
-        node.get_strategy(strategy, reach);
+        node.get_strategy(strategy, reach, iterations);
 
         double action_utils[MAX_ACTIONS] = {};
         double node_util[2] = {};
