@@ -525,7 +525,7 @@ struct CFRTrainer {
         uint32_t ni = iterations, nn = nodes.size();
         f.write((char*)&ni, 4);
         f.write((char*)&nn, 4);
-        // Each node: key(8), atype(1), nactions(1), avg_strategy[4](4*8=32)
+        // Each node: key(8), atype(1), nactions(1), avg_strategy[4](32), confidence(8)
         for (auto& [key, node] : nodes) {
             f.write((char*)&key, 8);
             f.write((char*)&node.action_type, 1);
@@ -533,6 +533,10 @@ struct CFRTrainer {
             double avg[MAX_ACTIONS];
             node.get_average_strategy(avg);
             f.write((char*)avg, MAX_ACTIONS * 8);
+            // Confidence = sum of strategy_sum (proxy for visit count)
+            double conf = 0;
+            for (int i = 0; i < node.num_actions; i++) conf += node.strategy_sum[i];
+            f.write((char*)&conf, 8);
         }
         f.close();
     }

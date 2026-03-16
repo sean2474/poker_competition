@@ -40,16 +40,19 @@ def convert(bin_path, out_dir):
     keys = np.zeros(num_nodes, dtype=np.uint64)
     act_types = np.zeros(num_nodes, dtype=np.uint8)
     probs = np.zeros((num_nodes, MAX_ACTIONS), dtype=np.uint8)
+    confidence = np.zeros(num_nodes, dtype=np.float32)
 
-    node_size = 8 + 1 + 1 + MAX_ACTIONS * 8  # 42 bytes per node
+    # Each node: key(8) + atype(1) + nactions(1) + avg[4](32) + confidence(8) = 50 bytes
     for i in range(num_nodes):
         key = struct.unpack_from('<Q', data, offset)[0]; offset += 8
         atype = struct.unpack_from('<B', data, offset)[0]; offset += 1
         nact = struct.unpack_from('<B', data, offset)[0]; offset += 1
         avg = struct.unpack_from(f'<{MAX_ACTIONS}d', data, offset); offset += MAX_ACTIONS * 8
+        conf = struct.unpack_from('<d', data, offset)[0]; offset += 8
 
         keys[i] = key
         act_types[i] = atype
+        confidence[i] = conf
 
         # Quantize and normalize
         raw = list(avg[:nact])
@@ -74,6 +77,7 @@ def convert(bin_path, out_dir):
     np.save(os.path.join(out_dir, "strategy_keys.npy"), keys)
     np.save(os.path.join(out_dir, "strategy_acttype.npy"), act_types)
     np.save(os.path.join(out_dir, "strategy_probs.npy"), probs)
+    np.save(os.path.join(out_dir, "strategy_confidence.npy"), confidence)
 
     meta = {
         'iterations': iterations,

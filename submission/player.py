@@ -33,8 +33,11 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 STRATEGY_KEYS_PATH = os.path.join(DATA_DIR, "strategy_keys.npy")
 STRATEGY_PROBS_PATH = os.path.join(DATA_DIR, "strategy_probs.npy")
 STRATEGY_ACTTYPE_PATH = os.path.join(DATA_DIR, "strategy_acttype.npy")
+STRATEGY_CONFIDENCE_PATH = os.path.join(DATA_DIR, "strategy_confidence.npy")
 STRATEGY_META_PATH = os.path.join(DATA_DIR, "strategy_meta.pkl")
 STRATEGY_PKL_PATH = os.path.join(DATA_DIR, "strategy.pkl")
+
+CONFIDENCE_THRESHOLD = 50.0  # strategy_sum total below this → low confidence
 
 # Action context encoding matching C++
 _CTX_MAP = {"no_bet": 0, "facing_bet": 1, "high_pressure": 2}
@@ -111,6 +114,7 @@ class PlayerAgent(Agent):
         self.probs = None
         self.act_types = None
         self.action_lists = None
+        self.confidence = None
 
         # Per-hand tracking
         self.current_hand = -1
@@ -133,6 +137,8 @@ class PlayerAgent(Agent):
                 keys = np.load(STRATEGY_KEYS_PATH)
                 self.probs = np.load(STRATEGY_PROBS_PATH)
                 self.act_types = np.load(STRATEGY_ACTTYPE_PATH)
+                if os.path.exists(STRATEGY_CONFIDENCE_PATH):
+                    self.confidence = np.load(STRATEGY_CONFIDENCE_PATH)
                 with open(STRATEGY_META_PATH, 'rb') as f:
                     meta = pickle.load(f)
                 self.action_lists = meta['action_lists']
@@ -213,9 +219,13 @@ class PlayerAgent(Agent):
         return observation.get("blind_position", 0) == 1
 
     def _cfr_lookup(self, observation) -> tuple:
-        """Try CFR strategy lookup using C++-compatible FNV-1a keys."""
+        """
+        CFR strategy lookup with confidence-based blending.
+        Returns (concrete_action, confidence) or (None, 0).
+        confidence in [0, 1]: how much to trust CFR vs fallback.
+        """
         if not self.strategy_loaded:
-            return None
+            return None, 0.0
 
         my_cards = [c for c in observation["my_cards"] if c != -1]
         community = [c for c in observation["community_cards"] if c != -1]
@@ -231,7 +241,6 @@ class PlayerAgent(Agent):
         n = len(valid_abs)
         action_ctx = get_action_context(valid, my_bet, opp_bet, max_raise)
 
-        # Build key using C++-compatible FNV-1a hash
         if street == 0:
             hand5 = self.my_hand_5 if self.my_hand_5 else my_cards
             h = _make_preflop_key(hand5, is_bb, self.street_history)
@@ -248,15 +257,20 @@ class PlayerAgent(Agent):
 
         idx = self.key_to_idx.get(h)
         if idx is None:
-            return None
+            return None, 0.0
 
-        # Verify action list type matches
         stored_type = self.act_types[idx]
         if stored_type >= len(self.action_lists):
-            return None
+            return None, 0.0
         stored_actions = list(self.action_lists[stored_type])
         if len(stored_actions) != n or stored_actions != valid_abs:
-            return None
+            return None, 0.0
+
+        # Confidence from strategy_sum total
+        conf = 0.0
+        if self.confidence is not None and idx < len(self.confidence):
+            raw_conf = float(self.confidence[idx])
+            conf = min(raw_conf / CONFIDENCE_THRESHOLD, 1.0)
 
         # Read quantized probs and dequantize
         raw_probs = self.probs[idx, :n].astype(np.float32)
@@ -276,7 +290,7 @@ class PlayerAgent(Agent):
             self.hero_last_raiser = True
             self.villain_last_raiser = False
 
-        return concrete
+        return concrete, conf
 
     def _fallback_action(self, observation) -> tuple:
         """MC equity-based fallback when CFR has no entry."""
@@ -432,10 +446,20 @@ class PlayerAgent(Agent):
             self.my_discards = [my_cards[k] for k in range(5) if k != ki and k != kj]
             return (_DISCARD, 0, ki, kj)
 
-        # ─── Betting phase: try CFR, fallback to heuristic ───
-        result = self._cfr_lookup(observation)
-        if result is not None:
-            return result
+        # ─── Betting phase: confidence-based CFR/fallback blending ───
+        cfr_action, confidence = self._cfr_lookup(observation)
+
+        if cfr_action is None:
+            # CFR miss → pure fallback
+            return self._fallback_action(observation)
+
+        if confidence >= 0.8:
+            # High confidence → trust CFR
+            return cfr_action
+
+        # Low/medium confidence → coin flip weighted by confidence
+        if random.random() < confidence:
+            return cfr_action
         return self._fallback_action(observation)
 
     def observe(self, observation, reward, terminated, truncated, info):
