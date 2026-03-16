@@ -44,7 +44,6 @@ def get_action_context(valid_actions: list, my_bet: int, opp_bet: int,
     if not can_raise or max_raise <= 0:
         return "high_pressure"
 
-    pot = my_bet + opp_bet
     # High pressure if to_call is > 60% of remaining stack capacity
     remaining_capacity = 100 - max(my_bet, opp_bet)
     if remaining_capacity > 0 and to_call / remaining_capacity > 0.6:

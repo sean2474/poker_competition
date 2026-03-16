@@ -256,6 +256,9 @@ class PlayerAgent(Agent):
         pot = my_bet + opp_bet
         pot_odds = to_call / (to_call + pot) if to_call > 0 and pot > 0 else 0
 
+        opp_combos = []
+        opp_weights = None
+
         # ─── Compute MC equity (discard-aware) ───
         if len(hand) == 2 and community:
             from abstractions.card_utils import get_evaluator, int_to_treys, ALL_CARDS
@@ -340,7 +343,7 @@ class PlayerAgent(Agent):
             elif has_a: equity = 0.45
             elif max(ranks) >= 6: equity = 0.35
 
-        # ─── Equity-based decision ───
+        # ─── Action decision ───
         def _act(action_str, action_type, raise_amt=0):
             self.street_history += action_to_short(action_str)
             if action_str in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
@@ -348,6 +351,7 @@ class PlayerAgent(Agent):
                 self.villain_last_raiser = False
             return (action_type, raise_amt, 0, 0)
 
+        # Equity-based decision
         if equity > 0.75 and valid[_RAISE]:
             amount = max(min_raise, min(int(pot * 0.75), max_raise))
             return _act("BET_LARGE", _RAISE, amount)
