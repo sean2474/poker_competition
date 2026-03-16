@@ -16,6 +16,7 @@ from abstractions.action_abs import (
     get_valid_abstract_actions, abstract_to_concrete,
     action_to_short, get_action_context,
 )
+from abstractions.realtime_search import solve_subgame
 from abstractions.card_utils import card_rank, canonicalize_suits, ACE_RANK_IDX
 from abstractions.board_texture import board_bucket_for_street
 from abstractions.hand_bucket import hand_bucket_for_street
