@@ -6,7 +6,6 @@ import struct
 
 import numpy as np
 
-# Ensure abstractions/ is importable from both project root and submission/
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agents.agent import Agent
@@ -17,17 +16,11 @@ from abstractions.action_abs import (
     get_valid_abstract_actions, abstract_to_concrete,
     action_to_short, get_action_context,
 )
-from abstractions.hand_bucket import _made_tier_from_structure, _draw_tier
-from abstractions.card_utils import (
-    card_rank, card_suit, canonicalize_suits, ACE_RANK_IDX,
-)
+from abstractions.card_utils import card_rank, canonicalize_suits, ACE_RANK_IDX
 from abstractions.board_texture import board_bucket_for_street
 from abstractions.hand_bucket import hand_bucket_for_street
 from abstractions.opp_discard_bucket import opp_discard_bucket
-from abstractions.public_state import (
-    line_bucket, pressure_bucket, initiative_bucket_simple,
-)
-
+from abstractions.public_state import line_bucket, pressure_bucket
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 STRATEGY_KEYS_PATH = os.path.join(DATA_DIR, "strategy_keys.npy")
@@ -35,11 +28,9 @@ STRATEGY_PROBS_PATH = os.path.join(DATA_DIR, "strategy_probs.npy")
 STRATEGY_ACTTYPE_PATH = os.path.join(DATA_DIR, "strategy_acttype.npy")
 STRATEGY_CONFIDENCE_PATH = os.path.join(DATA_DIR, "strategy_confidence.npy")
 STRATEGY_META_PATH = os.path.join(DATA_DIR, "strategy_meta.pkl")
-STRATEGY_PKL_PATH = os.path.join(DATA_DIR, "strategy.pkl")
 
-CONFIDENCE_THRESHOLD = 50.0  # strategy_sum total below this → low confidence
+CONFIDENCE_THRESHOLD = 50.0
 
-# Action context encoding matching C++
 _CTX_MAP = {"no_bet": 0, "facing_bet": 1, "high_pressure": 2}
 
 
@@ -106,7 +97,6 @@ _DISCARD = 4
 class PlayerAgent(Agent):
     def __init__(self, stream: bool = True):
         super().__init__(stream)
-        self.action_types = PokerEnv.ActionType
 
         # Strategy lookup tables
         self.strategy_loaded = False
@@ -130,68 +120,25 @@ class PlayerAgent(Agent):
         self._load_strategy()
 
     def _load_strategy(self):
-        """Load compressed numpy strategy or fall back to pickle."""
-        # Try compressed format first
-        if os.path.exists(STRATEGY_KEYS_PATH):
-            try:
-                keys = np.load(STRATEGY_KEYS_PATH)
-                self.probs = np.load(STRATEGY_PROBS_PATH)
-                self.act_types = np.load(STRATEGY_ACTTYPE_PATH)
-                if os.path.exists(STRATEGY_CONFIDENCE_PATH):
-                    self.confidence = np.load(STRATEGY_CONFIDENCE_PATH)
-                with open(STRATEGY_META_PATH, 'rb') as f:
-                    meta = pickle.load(f)
-                self.action_lists = meta['action_lists']
-                # Build hash -> index lookup
-                self.key_to_idx = {}
-                for i in range(len(keys)):
-                    self.key_to_idx[int(keys[i])] = i
-                self.strategy_loaded = True
-                self.logger.info(
-                    f"Loaded compressed strategy: {meta['iterations']} iters, "
-                    f"{meta['num_nodes']} nodes"
-                )
-                return
-            except Exception as e:
-                self.logger.warning(f"Failed to load compressed strategy: {e}")
-
-        # Fallback: pickle format
-        if os.path.exists(STRATEGY_PKL_PATH):
-            try:
-                with open(STRATEGY_PKL_PATH, 'rb') as f:
-                    data = pickle.load(f)
-                # Convert to same lookup format
-                action_lists_map = {
-                    ('FOLD', 'CALL', 'JAM'): 0,
-                    ('FOLD', 'CALL'): 1,
-                    ('FOLD', 'CALL', 'RAISE_SMALL', 'RAISE_LARGE'): 2,
-                    ('CHECK', 'BET_SMALL', 'BET_LARGE'): 3,
-                    ('CHECK',): 4,
-                }
-                self.action_lists = [
-                    ('FOLD', 'CALL', 'JAM'),
-                    ('FOLD', 'CALL'),
-                    ('FOLD', 'CALL', 'RAISE_SMALL', 'RAISE_LARGE'),
-                    ('CHECK', 'BET_SMALL', 'BET_LARGE'),
-                    ('CHECK',),
-                ]
-                n = len(data['strategies'])
-                self.probs = np.zeros((n, 4), dtype=np.uint8)
-                self.act_types = np.zeros(n, dtype=np.uint8)
-                self.key_to_idx = {}
-                for i, (key, node) in enumerate(data['strategies'].items()):
-                    h = _hash_key(key)
-                    self.key_to_idx[h] = i
-                    al = tuple(node['actions'])
-                    self.act_types[i] = action_lists_map.get(al, 255)
-                    for j, p in enumerate(node['strategy']):
-                        self.probs[i, j] = max(0, min(255, int(round(p * 255))))
-                self.strategy_loaded = True
-                self.logger.info(
-                    f"Loaded pkl strategy: {data['iterations']} iters, {n} nodes"
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to load strategy: {e}")
+        """Load compressed numpy strategy."""
+        if not os.path.exists(STRATEGY_KEYS_PATH):
+            return
+        try:
+            keys = np.load(STRATEGY_KEYS_PATH)
+            self.probs = np.load(STRATEGY_PROBS_PATH)
+            self.act_types = np.load(STRATEGY_ACTTYPE_PATH)
+            if os.path.exists(STRATEGY_CONFIDENCE_PATH):
+                self.confidence = np.load(STRATEGY_CONFIDENCE_PATH)
+            with open(STRATEGY_META_PATH, 'rb') as f:
+                meta = pickle.load(f)
+            self.action_lists = meta['action_lists']
+            self.key_to_idx = {int(keys[i]): i for i in range(len(keys))}
+            self.strategy_loaded = True
+            self.logger.info(
+                f"Loaded strategy: {meta['iterations']} iters, {meta['num_nodes']} nodes"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to load strategy: {e}")
 
     def __name__(self):
         return "PlayerAgent"

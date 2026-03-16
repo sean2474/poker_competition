@@ -4,9 +4,9 @@ Board texture bucketing for flop, turn, and river.
 Each street computes texture INDEPENDENTLY (not recursively).
 A small delta (0-2) captures what the new card changed.
 
-Flop:  pairedness(3) × suitedness(3) × connectivity(3) × height(3) = ~81
-Turn:  4-card texture(~30) × delta(3) = ~90
-River: 5-card texture(~40) × delta(3) = ~120
+Flop:  pairedness(3) x suitedness(3) x connectivity(3) x height(3) = ~81
+Turn:  4-card texture(~30) x delta(3) = ~90
+River: 5-card texture(~40) x delta(3) = ~120
 """
 
 from abstractions.card_utils import (

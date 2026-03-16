@@ -4,7 +4,6 @@ Deck constants, canonical hand forms, and evaluator wrapper.
 """
 
 import itertools
-from functools import lru_cache
 
 # ─── Deck constants ───
 RANKS = "23456789A"
@@ -14,11 +13,8 @@ NUM_SUITS = len(SUITS)  # 3
 DECK_SIZE = NUM_RANKS * NUM_SUITS  # 27
 ALL_CARDS = list(range(DECK_SIZE))
 
-RANK_TO_IDX = {r: i for i, r in enumerate(RANKS)}
-SUIT_TO_IDX = {s: i for i, s in enumerate(SUITS)}
-
 # Ace index (used for special straight logic)
-ACE_RANK_IDX = RANK_TO_IDX["A"]  # 8
+ACE_RANK_IDX = 8  # index of 'A' in RANKS
 
 
 # ─── Basic card accessors ───
@@ -103,28 +99,6 @@ def canonical_5card_id(cards_5: list) -> tuple:
     return canonicalize_suits(tuple(sorted(cards_5)))
 
 
-def canonical_hand_board(hand: list, board: list) -> tuple:
-    """
-    Canonicalize hand + board together, preserving which are hand vs board.
-    Returns (canon_hand, canon_board) with consistent suit relabeling.
-    """
-    combined = list(hand) + list(board)
-    suit_map = {}
-    next_suit = 0
-    for c in combined:
-        s = card_suit(c)
-        if s not in suit_map:
-            suit_map[s] = next_suit
-            next_suit += 1
-
-    def remap(c):
-        return make_card(card_rank(c), suit_map[card_suit(c)])
-
-    canon_hand = tuple(sorted(remap(c) for c in hand))
-    canon_board = tuple(sorted(remap(c) for c in board))
-    return canon_hand, canon_board
-
-
 # ─── Rank/suit analysis helpers ───
 def rank_counts(cards: list) -> dict:
     """Returns {rank_idx: count}."""
@@ -142,24 +116,12 @@ def suit_counts(cards: list) -> dict:
         counts[s] = counts.get(s, 0) + 1
     return counts
 
-def ranks_set(cards: list) -> set:
-    return {card_rank(c) for c in cards}
-
-def suits_set(cards: list) -> set:
-    return {card_suit(c) for c in cards}
-
 def has_ace(cards: list) -> bool:
     return any(card_rank(c) == ACE_RANK_IDX for c in cards)
 
 def sorted_ranks(cards: list) -> list:
     """Sorted rank indices, ascending."""
     return sorted(card_rank(c) for c in cards)
-
-def max_rank(cards: list) -> int:
-    return max(card_rank(c) for c in cards)
-
-def min_rank(cards: list) -> int:
-    return min(card_rank(c) for c in cards)
 
 
 # ─── Straight detection (with A-low and A-high) ───
@@ -196,20 +158,6 @@ def straight_draw_outs(rank_set: set) -> int:
         if has_straight_potential(test, 5):
             outs += 1
     return outs
-
-
-# ─── Flush helpers ───
-def flush_draw_info(hand: list, board: list) -> tuple:
-    """
-    Returns (max_same_suit_count, suits_with_most) for hand+board combined,
-    considering only hand cards that contribute.
-    """
-    combined = list(hand) + list(board)
-    sc = suit_counts(combined)
-    if not sc:
-        return 0, 0
-    max_count = max(sc.values())
-    return max_count, sum(1 for v in sc.values() if v == max_count)
 
 
 # ─── All C(5,2) keep pairs ───
