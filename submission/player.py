@@ -29,7 +29,7 @@ STRATEGY_ACTTYPE_PATH = os.path.join(DATA_DIR, "strategy_acttype.npy")
 STRATEGY_CONFIDENCE_PATH = os.path.join(DATA_DIR, "strategy_confidence.npy")
 STRATEGY_META_PATH = os.path.join(DATA_DIR, "strategy_meta.pkl")
 
-CONFIDENCE_THRESHOLD = 50.0
+CONFIDENCE_THRESHOLD = 300000000.0  # ~median of 8M checkpoint; only well-visited nodes use CFR
 
 _CTX_MAP = {"no_bet": 0, "facing_bet": 1}
 
