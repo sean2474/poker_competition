@@ -61,12 +61,16 @@ def convert_bin(bin_path):
     act_types = np.zeros(nodes, dtype=np.uint8)
     probs = np.zeros((nodes, MAX_ACTIONS), dtype=np.uint8)
 
+    confidence = np.zeros(nodes, dtype=np.float32) if has_conf else None
+
     for i in range(nodes):
         key = struct.unpack_from('<Q', data, offset)[0]; offset += 8
         atype = struct.unpack_from('<B', data, offset)[0]; offset += 1
         nact = struct.unpack_from('<B', data, offset)[0]; offset += 1
         avg = struct.unpack_from(f'<{MAX_ACTIONS}d', data, offset); offset += MAX_ACTIONS * 8
-        if has_conf: offset += 8
+        if has_conf:
+            conf_val = struct.unpack_from('<d', data, offset)[0]; offset += 8
+            confidence[i] = conf_val
         keys[i] = key; act_types[i] = atype; nact = min(nact, MAX_ACTIONS)
         if nact == 0: continue
         raw = list(avg[:nact]); total = sum(raw)
@@ -79,18 +83,22 @@ def convert_bin(bin_path):
             mx = np.argmax(probs[i, :nact]); probs[i, mx] = max(0, min(255, probs[i, mx] + (255 - rs)))
 
     key_to_idx = {int(keys[i]): i for i in range(nodes)}
-    return key_to_idx, probs, act_types, ACTION_LISTS, iters, nodes
+    return key_to_idx, probs, act_types, ACTION_LISTS, confidence, iters, nodes
+
+
+CONFIDENCE_THRESHOLD = 50.0
 
 
 class SimpleAgent:
     """Lightweight agent that plays using a specific strategy table."""
 
-    def __init__(self, name, key_to_idx, probs, act_types, action_lists):
+    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None):
         self.name = name
         self.key_to_idx = key_to_idx
         self.probs = probs
         self.act_types = act_types
         self.action_lists = action_lists
+        self.confidence = confidence
         self.reset()
 
     def reset(self):
@@ -135,7 +143,7 @@ class SimpleAgent:
         return _fnv_hash(bytes(buf))
 
     def _cfr_action(self, obs):
-        """Try CFR lookup, return concrete action or None."""
+        """Try CFR lookup, return (concrete_action, confidence) or (None, 0)."""
         my_cards = [c for c in obs["my_cards"] if c != -1]
         community = [c for c in obs["community_cards"] if c != -1]
         is_bb = obs.get("blind_position", 0) == 1
@@ -156,14 +164,19 @@ class SimpleAgent:
 
         idx = self.key_to_idx.get(h)
         if idx is None:
-            return None
+            return None, 0.0
 
         stored_type = self.act_types[idx]
         if stored_type >= len(self.action_lists):
-            return None
+            return None, 0.0
         stored_actions = list(self.action_lists[stored_type])
         if len(stored_actions) != n or stored_actions != valid_abs:
-            return None
+            return None, 0.0
+
+        # Confidence
+        conf = 0.0
+        if self.confidence is not None and idx < len(self.confidence):
+            conf = min(float(self.confidence[idx]) / CONFIDENCE_THRESHOLD, 1.0)
 
         raw_probs = self.probs[idx, :n].astype(np.float32)
         total = raw_probs.sum()
@@ -172,12 +185,8 @@ class SimpleAgent:
         chosen_idx = random.choices(range(n), weights=probs.tolist(), k=1)[0]
         chosen_abs = valid_abs[chosen_idx]
 
-        self.street_history += action_to_short(chosen_abs)
-        if chosen_abs in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE","JAM"):
-            self.hero_last_raiser = True
-            self.villain_last_raiser = False
-
-        return abstract_to_concrete(chosen_abs, int(min_raise), int(max_raise), int(my_bet), int(opp_bet))
+        concrete = abstract_to_concrete(chosen_abs, int(min_raise), int(max_raise), int(my_bet), int(opp_bet))
+        return concrete, conf, chosen_abs
 
     def _fallback_action(self, obs):
         """GTO-balanced equity fallback."""
@@ -324,9 +333,24 @@ class SimpleAgent:
             self.my_discards = [my_cards[k] for k in range(5) if k != ki and k != kj]
             return (_DISCARD, 0, ki, kj)
 
-        cfr = self._cfr_action(obs)
-        if cfr is not None:
-            return self._clamp(cfr, obs)
+        cfr_result = self._cfr_action(obs)
+        cfr_action, conf = cfr_result[0], cfr_result[1]
+
+        if cfr_action is not None:
+            use_cfr = False
+            if conf >= 0.8:
+                use_cfr = True
+            elif random.random() < conf:
+                use_cfr = True
+
+            if use_cfr:
+                chosen_abs = cfr_result[2]
+                self.street_history += action_to_short(chosen_abs)
+                if chosen_abs in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE","JAM"):
+                    self.hero_last_raiser = True
+                    self.villain_last_raiser = False
+                return self._clamp(cfr_action, obs)
+
         return self._clamp(self._fallback_action(obs), obs)
 
     def observe_opp(self, opp_action):
@@ -384,12 +408,12 @@ def main():
     logging.basicConfig(level=logging.WARNING)
 
     print(f"Loading {args.bin_a}...")
-    kA, pA, atA, alA, iA, nA = convert_bin(args.bin_a)
-    print(f"  → {iA:,} iters, {nA:,} nodes")
+    kA, pA, atA, alA, cA, iA, nA = convert_bin(args.bin_a)
+    print(f"  → {iA:,} iters, {nA:,} nodes, conf={'YES' if cA is not None else 'NO'}")
 
     print(f"Loading {args.bin_b}...")
-    kB, pB, atB, alB, iB, nB = convert_bin(args.bin_b)
-    print(f"  → {iB:,} iters, {nB:,} nodes")
+    kB, pB, atB, alB, cB, iB, nB = convert_bin(args.bin_b)
+    print(f"  → {iB:,} iters, {nB:,} nodes, conf={'YES' if cB is not None else 'NO'}")
 
     nameA = f"{iA//1000}k"
     nameB = f"{iB//1000}k"
@@ -398,8 +422,8 @@ def main():
     print(f"\n=== {nameA} vs {nameB} ({args.matches} matches) ===")
 
     for m in range(args.matches):
-        agentA = SimpleAgent(nameA, kA, pA, atA, alA)
-        agentB = SimpleAgent(nameB, kB, pB, atB, alB)
+        agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA)
+        agentB = SimpleAgent(nameB, kB, pB, atB, alB, cB)
 
         reward = run_match(agentA, agentB, num_hands=1000)
         winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
