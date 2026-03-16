@@ -365,21 +365,81 @@ class PlayerAgent(Agent):
                 self.villain_last_raiser = False
             return (action_type, raise_amt, 0, 0)
 
-        # Equity-based decision
-        if equity > 0.75 and valid[_RAISE]:
-            amount = max(min_raise, min(int(pot * 0.75), max_raise))
-            return _act("BET_LARGE", _RAISE, amount)
-        elif equity > 0.55 and valid[_RAISE] and to_call <= 0:
-            amount = max(min_raise, min(int(pot * 0.5), max_raise))
-            return _act("BET_SMALL", _RAISE, amount)
-        elif equity >= pot_odds and equity > 0.35 and valid[_CALL]:
-            return _act("CALL", _CALL)
-        elif valid[_CHECK]:
-            return _act("CHECK", _CHECK)
-        elif equity >= pot_odds and valid[_CALL]:
-            return _act("CALL", _CALL)
+        # GTO-balanced decision
+        can_raise = valid[_RAISE] and max_raise > 0
+        can_call = valid[_CALL]
+        can_check = valid[_CHECK]
+        facing_bet = to_call > 0
+
+        if facing_bet:
+            # Facing a bet: fold/call/raise based on pot odds + equity
+            # GTO call threshold = pot odds (minimum defense frequency)
+            # Raise with very strong hands, call with medium, fold with weak
+            if can_raise:
+                raise_amt = max(min_raise, min(int(pot * 0.75), max_raise))
+                if equity > 0.75:
+                    # Strong: raise most, sometimes call (trap)
+                    r = random.random()
+                    if r < 0.7:
+                        return _act("RAISE_LARGE", _RAISE, raise_amt)
+                    else:
+                        return _act("CALL", _CALL)
+                elif equity > pot_odds + 0.1:
+                    # Medium-strong: mostly call, sometimes raise
+                    r = random.random()
+                    if r < 0.15:
+                        return _act("RAISE_SMALL", _RAISE, max(min_raise, min(int(pot * 0.4), max_raise)))
+                    else:
+                        return _act("CALL", _CALL)
+                elif equity >= pot_odds:
+                    # Borderline: call at minimum defense frequency
+                    return _act("CALL", _CALL)
+                else:
+                    return _act("FOLD", _FOLD)
+            else:
+                # Can't raise
+                if equity >= pot_odds and can_call:
+                    return _act("CALL", _CALL)
+                elif can_call and equity >= pot_odds * 0.8:
+                    return _act("CALL", _CALL)
+                else:
+                    return _act("FOLD", _FOLD)
         else:
-            return _act("FOLD", _FOLD)
+            # No bet to face: check/bet
+            # GTO: bet with value hands + bluffs at correct ratio
+            # bluff_ratio = bet_size / (pot + bet_size)
+            if can_raise:
+                bet_large = max(min_raise, min(int(pot * 0.75), max_raise))
+                bet_small = max(min_raise, min(int(pot * 0.33), max_raise))
+                # Bluff ratio for bet_small: ~25% of betting range should be bluffs
+                bluff_ratio = bet_small / (pot + bet_small) if pot > 0 else 0.25
+
+                if equity > 0.70:
+                    # Value bet: large most of the time, sometimes check (trap)
+                    r = random.random()
+                    if r < 0.75:
+                        return _act("BET_LARGE", _RAISE, bet_large)
+                    else:
+                        return _act("CHECK", _CHECK)
+                elif equity > 0.55:
+                    # Thin value: small bet sometimes
+                    r = random.random()
+                    if r < 0.5:
+                        return _act("BET_SMALL", _RAISE, bet_small)
+                    else:
+                        return _act("CHECK", _CHECK)
+                elif equity < 0.25:
+                    # Bluff candidate: bet at GTO bluff frequency
+                    r = random.random()
+                    if r < bluff_ratio * 0.5:  # half the theoretical bluff freq (conservative)
+                        return _act("BET_SMALL", _RAISE, bet_small)
+                    else:
+                        return _act("CHECK", _CHECK)
+                else:
+                    # Medium/showdown value: mostly check
+                    return _act("CHECK", _CHECK)
+            else:
+                return _act("CHECK", _CHECK) if can_check else _act("FOLD", _FOLD)
 
     def act(self, observation, reward, terminated, truncated, info):
         hand_number = info.get('hand_number', -1)

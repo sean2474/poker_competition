@@ -175,7 +175,24 @@ class OpponentRangeTracker:
         if not self.initialized or not self.opp_combos:
             return
 
-        # Recompute equities if community cards changed
+        # Remove combos that contain new community cards (they're no longer possible)
+        dead = set(my_hand) | set(community)
+        valid = []
+        valid_w = []
+        for i, combo in enumerate(self.opp_combos):
+            if combo[0] not in dead and combo[1] not in dead:
+                valid.append(combo)
+                valid_w.append(self.weights[i])
+        if not valid:
+            return
+        # Renormalize
+        w_total = sum(valid_w)
+        if w_total > 0:
+            valid_w = [w / w_total for w in valid_w]
+        self.opp_combos = valid
+        self.weights = valid_w
+
+        # Recompute equities with updated community
         if community and len(my_hand) == 2:
             self.opp_equities = compute_hand_equities(
                 my_hand, community, self.opp_combos, num_sims=30
