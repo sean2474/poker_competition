@@ -31,7 +31,7 @@ STRATEGY_META_PATH = os.path.join(DATA_DIR, "strategy_meta.pkl")
 
 CONFIDENCE_THRESHOLD = 50.0
 
-_CTX_MAP = {"no_bet": 0, "facing_bet": 1, "high_pressure": 2}
+_CTX_MAP = {"no_bet": 0, "facing_bet": 1}
 
 
 # ─── FNV-1a hash (matches C++ cfr_engine.h exactly) ───

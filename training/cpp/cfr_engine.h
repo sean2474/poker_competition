@@ -5,6 +5,9 @@
 #include <cstring>
 #include <fstream>
 #include <numeric>
+#include <mutex>
+#include <atomic>
+#include <thread>
 
 constexpr int MAX_BET = 100;
 constexpr int SMALL_BLIND = 1;
@@ -16,7 +19,7 @@ constexpr int MAX_HISTORY = 32;
 // Action context + valid actions
 // ═══════════════════════════════════════════════
 
-enum ActionCtx : uint8_t { CTX_NO_BET = 0, CTX_FACING_BET = 1, CTX_HIGH_PRESSURE = 2 };
+enum ActionCtx : uint8_t { CTX_NO_BET = 0, CTX_FACING_BET = 1 };
 enum AbsAction : uint8_t {
     A_FOLD=0, A_CALL=1, A_CHECK=2, A_BET_SMALL=3, A_BET_LARGE=4,
     A_RAISE_SMALL=5, A_RAISE_LARGE=6, A_JAM=7
@@ -52,12 +55,7 @@ struct GameState {
 
     ActionCtx get_action_ctx() const {
         int to_call = bets[1 - current_player] - bets[current_player];
-        int max_raise = MAX_BET - std::max(bets[0], bets[1]);
-        bool can_raise = (max_raise > 0 && min_raise <= max_raise);
         if (to_call <= 0) return CTX_NO_BET;
-        int rem_cap = MAX_BET - std::max(bets[0], bets[1]);
-        if ((rem_cap > 0 && (double)to_call / rem_cap > 0.6) || !can_raise)
-            return CTX_HIGH_PRESSURE;
         return CTX_FACING_BET;
     }
 
@@ -73,12 +71,9 @@ struct GameState {
             out[n++] = A_CHECK;
             if (can_raise) { out[n++] = A_BET_SMALL; out[n++] = A_BET_LARGE; }
         } else {
-            int rem_cap = MAX_BET - std::max(bets[0], bets[1]);
-            bool hp = (rem_cap > 0 && (double)to_call / rem_cap > 0.6) || !can_raise;
             out[n++] = A_FOLD;
             out[n++] = A_CALL;
-            if (hp) { if (can_raise) out[n++] = A_JAM; }
-            else { if (can_raise) { out[n++] = A_RAISE_SMALL; out[n++] = A_RAISE_LARGE; } }
+            if (can_raise) { out[n++] = A_RAISE_SMALL; out[n++] = A_RAISE_LARGE; }
         }
         return n;
     }
@@ -86,7 +81,6 @@ struct GameState {
     GameState apply(AbsAction action) const {
         GameState s = *this;
         int cp = s.current_player, opp = 1 - cp;
-        int pot = s.bets[0] + s.bets[1];
         int max_raise = MAX_BET - std::max(s.bets[0], s.bets[1]);
 
         s.street_history[s.hist_len++] = action_short(action);
@@ -114,8 +108,7 @@ struct GameState {
         // Raise/bet types
         int raise_amount;
         int spread = max_raise - s.min_raise;
-        if (action == A_JAM) raise_amount = max_raise;
-        else if (action == A_BET_LARGE || action == A_RAISE_LARGE) raise_amount = s.min_raise + (int)(spread * 0.70);
+        if (action == A_BET_LARGE || action == A_RAISE_LARGE) raise_amount = s.min_raise + (int)(spread * 0.70);
         else raise_amount = s.min_raise + (int)(spread * 0.25);
 
         raise_amount = std::max(s.min_raise, std::min(raise_amount, max_raise));
@@ -381,13 +374,12 @@ struct CFRNode {
     }
 };
 
-// Action list type encoding (matches Python)
+// Action list type encoding (matches Python convert_to_python.py)
 inline uint8_t get_action_list_type(const AbsAction* acts, int n) {
-    if (n == 3 && acts[0] == A_FOLD && acts[1] == A_CALL && acts[2] == A_JAM) return 0;
-    if (n == 2 && acts[0] == A_FOLD && acts[1] == A_CALL) return 1;
-    if (n == 4 && acts[0] == A_FOLD && acts[1] == A_CALL) return 2;
-    if (n == 3 && acts[0] == A_CHECK && acts[1] == A_BET_SMALL) return 3;
-    if (n == 1 && acts[0] == A_CHECK) return 4;
+    if (n == 2 && acts[0] == A_FOLD && acts[1] == A_CALL) return 0;
+    if (n == 4 && acts[0] == A_FOLD && acts[1] == A_CALL) return 1;  // FOLD,CALL,RAISE_S,RAISE_L
+    if (n == 1 && acts[0] == A_CHECK) return 2;
+    if (n == 3 && acts[0] == A_CHECK) return 3;  // CHECK,BET_S,BET_L
     return 255;
 }
 
@@ -397,16 +389,23 @@ inline uint8_t get_action_list_type(const AbsAction* acts, int n) {
 
 struct CFRTrainer {
     std::unordered_map<uint64_t, CFRNode> nodes;
-    int iterations = 0;
+    std::mutex node_mutex;  // protects map insert only
+    std::atomic<int> iterations{0};
 
     CFRNode& get_node(uint64_t key, int nactions, uint8_t atype) {
-        auto it = nodes.find(key);
-        if (it == nodes.end()) {
-            CFRNode& node = nodes[key];
-            node.init(nactions, atype);
-            return node;
+        // Fast path: node already exists (no lock needed for read in practice,
+        // but we use lock for insert safety)
+        {
+            auto it = nodes.find(key);
+            if (it != nodes.end()) return it->second;
         }
-        return it->second;
+        std::lock_guard<std::mutex> lock(node_mutex);
+        // Double-check after acquiring lock
+        auto it = nodes.find(key);
+        if (it != nodes.end()) return it->second;
+        CFRNode& node = nodes[key];
+        node.init(nactions, atype);
+        return node;
     }
 
     uint64_t make_key(const GameState& state, int cp,
@@ -504,7 +503,6 @@ struct CFRTrainer {
 
         int board3[3] = {community[0], community[1], community[2]};
 
-        // Discard
         auto [ki0, kj0] = choose_discard(p0_5, board3, nullptr, 0, 3, 60);
         int p0_hand[2] = {p0_5[ki0], p0_5[kj0]};
         int p0_disc[3]; { int d=0; for(int i=0;i<5;i++) if(i!=ki0&&i!=kj0) p0_disc[d++]=p0_5[i]; }
@@ -515,7 +513,29 @@ struct CFRTrainer {
 
         GameState state;
         cfr(state, p0_hand, p1_hand, p0_5, p1_5, community, p0_disc, p1_disc, 1.0, 1.0);
-        iterations++;
+        iterations.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void train_parallel(int num_iterations, int num_threads) {
+        // Pre-warm: run single-threaded first to populate most nodes
+        // This reduces lock contention during parallel phase
+        int warmup = std::min(1000, num_iterations / 10);
+        for (int i = 0; i < warmup; i++) train_one();
+        int remaining = num_iterations - warmup;
+
+        std::vector<std::thread> threads;
+        int per_thread = remaining / num_threads;
+        int extra = remaining % num_threads;
+
+        for (int t = 0; t < num_threads; t++) {
+            int count = per_thread + (t < extra ? 1 : 0);
+            threads.emplace_back([this, count]() {
+                for (int i = 0; i < count; i++) {
+                    train_one();
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
     }
 
     // Save binary format for Python conversion

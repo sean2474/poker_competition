@@ -18,7 +18,8 @@ int main(int argc, char** argv) {
     const char* output = "strategy.bin";
     const char* checkpoint = "checkpoint.bin";
     bool resume = false;
-    int validate_every = 0;  // 0 = no intermediate saves
+    int validate_every = 0;
+    int num_threads = 1;
 
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--iterations") == 0 && i+1 < argc) iterations = std::atoi(argv[++i]);
@@ -26,6 +27,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--checkpoint") == 0 && i+1 < argc) checkpoint = argv[++i];
         else if (std::strcmp(argv[i], "--resume") == 0) resume = true;
         else if (std::strcmp(argv[i], "--validate-every") == 0 && i+1 < argc) validate_every = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--threads") == 0 && i+1 < argc) num_threads = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
     }
 
@@ -37,40 +39,48 @@ int main(int argc, char** argv) {
                   << trainer.nodes.size() << " nodes" << std::endl;
     }
 
-    std::cout << "Training " << iterations << " iterations..." << std::endl;
+    std::cout << "Training " << iterations << " iterations"
+              << " (" << num_threads << " thread" << (num_threads > 1 ? "s" : "") << ")"
+              << std::endl;
 
     auto t0 = std::chrono::steady_clock::now();
-    int print_every = std::max(1, iterations / 20);
 
-    for (int i = 0; i < iterations; i++) {
-        trainer.train_one();
+    if (num_threads > 1) {
+        // Parallel training (lock-free Pluribus approach)
+        trainer.train_parallel(iterations, num_threads);
+    } else {
+        // Single-threaded with progress
+        int print_every = std::max(1, iterations / 20);
+        for (int i = 0; i < iterations; i++) {
+            trainer.train_one();
 
-        if ((i + 1) % print_every == 0 || i == iterations - 1) {
-            auto t1 = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(t1 - t0).count();
-            double ips = (i + 1) / elapsed;
-            std::cout << "  iter " << (i+1) << "/" << iterations
-                      << "  " << elapsed << "s  "
-                      << trainer.nodes.size() << " nodes  "
-                      << ips << " it/s" << std::endl;
-        }
+            if ((i + 1) % print_every == 0 || i == iterations - 1) {
+                auto t1 = std::chrono::steady_clock::now();
+                double elapsed = std::chrono::duration<double>(t1 - t0).count();
+                double ips = (i + 1) / elapsed;
+                std::cout << "  iter " << (i+1) << "/" << iterations
+                          << "  " << elapsed << "s  "
+                          << trainer.nodes.size() << " nodes  "
+                          << ips << " it/s" << std::endl;
+            }
 
-        // Periodic save for validation
-        if (validate_every > 0 && (i + 1) % validate_every == 0) {
-            std::cout << "\n--- Saving at iter " << trainer.iterations
-                      << " (" << trainer.nodes.size() << " nodes) ---" << std::endl;
-            trainer.save_binary(output);
-            trainer.save_checkpoint(checkpoint);
-            // Touch a signal file so the validation script knows to run
-            std::string signal = std::string(output) + ".ready";
-            std::ofstream(signal) << trainer.iterations << std::endl;
+            if (validate_every > 0 && (i + 1) % validate_every == 0) {
+                std::cout << "\n--- Saving at iter " << trainer.iterations
+                          << " (" << trainer.nodes.size() << " nodes) ---" << std::endl;
+                trainer.save_binary(output);
+                trainer.save_checkpoint(checkpoint);
+                std::string signal = std::string(output) + ".ready";
+                std::ofstream(signal) << trainer.iterations.load() << std::endl;
+            }
         }
     }
 
     auto t1 = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
+    double ips = iterations / elapsed;
     std::cout << "Done: " << trainer.iterations << " total iters in "
-              << elapsed << "s, " << trainer.nodes.size() << " nodes" << std::endl;
+              << elapsed << "s, " << trainer.nodes.size() << " nodes  "
+              << ips << " it/s" << std::endl;
 
     trainer.save_binary(output);
     std::cout << "Saved strategy to " << output << std::endl;

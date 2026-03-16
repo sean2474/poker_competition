@@ -18,11 +18,10 @@ import hashlib
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ACTION_LISTS = [
-    ("FOLD", "CALL", "JAM"),
-    ("FOLD", "CALL"),
-    ("FOLD", "CALL", "RAISE_SMALL", "RAISE_LARGE"),
-    ("CHECK", "BET_SMALL", "BET_LARGE"),
-    ("CHECK",),
+    ("FOLD", "CALL"),                               # 0
+    ("FOLD", "CALL", "RAISE_SMALL", "RAISE_LARGE"), # 1
+    ("CHECK",),                                     # 2
+    ("CHECK", "BET_SMALL", "BET_LARGE"),            # 3
 ]
 MAX_ACTIONS = 4
 
