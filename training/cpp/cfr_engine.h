@@ -516,46 +516,54 @@ struct CFRTrainer {
         iterations.fetch_add(1, std::memory_order_relaxed);
     }
 
-    const char* _save_output = nullptr;
-    const char* _save_checkpoint = nullptr;
-
     void train_parallel(int num_iterations, int num_threads,
                         const char* output_path = nullptr,
                         const char* checkpoint_path = nullptr,
-                        int save_every = 1000000) {
-        _save_output = output_path;
-        _save_checkpoint = checkpoint_path;
-
+                        int save_every = 250000) {
         // Pre-warm single-threaded
         int warmup = std::min(1000, num_iterations / 10);
         for (int i = 0; i < warmup; i++) train_one();
+        int total_target = num_iterations;
         int remaining = num_iterations - warmup;
 
-        // Progress + periodic save thread
+        // Monitor thread: progress bar + periodic checkpoint
         std::atomic<bool> done{false};
+        auto t0 = std::chrono::steady_clock::now();
+
         std::thread monitor([&]() {
             int last_saved = iterations.load();
-            auto t0 = std::chrono::steady_clock::now();
             while (!done) {
-                std::this_thread::sleep_for(std::chrono::seconds(30));
+                std::this_thread::sleep_for(std::chrono::seconds(10));
                 int cur = iterations.load();
-                auto t1 = std::chrono::steady_clock::now();
-                double elapsed = std::chrono::duration<double>(t1 - t0).count();
-                double ips = cur / elapsed;
-                std::cout << "  progress: " << cur << "/" << (warmup + remaining)
-                          << "  " << nodes.size() << " nodes  "
-                          << ips << " it/s" << std::endl;
+                auto now = std::chrono::steady_clock::now();
+                double elapsed = std::chrono::duration<double>(now - t0).count();
+                double ips = (elapsed > 0) ? cur / elapsed : 0;
+                double pct = 100.0 * cur / total_target;
+                double eta = (ips > 0) ? (total_target - cur) / ips : 0;
+                int eta_m = (int)(eta / 60);
+                int eta_s = (int)(eta) % 60;
 
-                // Save checkpoint periodically
+                // Progress bar
+                int bar_width = 30;
+                int filled = (int)(bar_width * cur / total_target);
+                std::string bar(filled, '#');
+                bar += std::string(bar_width - filled, '-');
+
+                printf("\r  [%s] %5.1f%%  %d/%d  %.0f it/s  %dk nodes  ETA %dm%02ds   ",
+                       bar.c_str(), pct, cur, total_target, ips,
+                       (int)(nodes.size() / 1000), eta_m, eta_s);
+                fflush(stdout);
+
+                // Checkpoint save
                 if (save_every > 0 && cur - last_saved >= save_every) {
-                    if (output_path) {
-                        std::cout << "  [saving checkpoint at " << cur << " iters]" << std::endl;
-                        save_binary(output_path);
-                        if (checkpoint_path) save_checkpoint(checkpoint_path);
-                    }
+                    printf("\n  >> Saving checkpoint at %d iters (%dk nodes)...\n", cur, (int)(nodes.size()/1000));
+                    if (output_path) save_binary(output_path);
+                    if (checkpoint_path) save_checkpoint(checkpoint_path);
+                    printf("  >> Saved.\n");
                     last_saved = cur;
                 }
             }
+            printf("\n");
         });
 
         // Worker threads
