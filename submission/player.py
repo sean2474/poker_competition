@@ -239,6 +239,20 @@ class PlayerAgent(Agent):
 
         return concrete, conf
 
+    def _clamp_raise(self, action, observation):
+        """Ensure raise amount is within [min_raise, max_raise]. Prevents invalid folds."""
+        action_type, amount, k1, k2 = action
+        if action_type == _RAISE:
+            mn = int(observation["min_raise"])
+            mx = int(observation["max_raise"])
+            amount = max(mn, min(int(amount), mx))
+            if mx <= 0:
+                # Can't raise, fall back to call or check
+                if observation["valid_actions"][_CALL]:
+                    return (_CALL, 0, 0, 0)
+                return (_CHECK, 0, 0, 0)
+        return (action_type, amount, k1, k2)
+
     def _fallback_action(self, observation) -> tuple:
         """MC equity-based fallback when CFR has no entry."""
         valid = observation["valid_actions"]
@@ -246,8 +260,8 @@ class PlayerAgent(Agent):
         community = [c for c in observation["community_cards"] if c != -1]
         my_bet = observation["my_bet"]
         opp_bet = observation["opp_bet"]
-        min_raise = observation["min_raise"]
-        max_raise = observation["max_raise"]
+        min_raise = int(observation["min_raise"])
+        max_raise = int(observation["max_raise"])
         street = observation["street"]
 
         hand = self.my_hand_2 if self.my_hand_2 else my_cards[:2]
@@ -401,17 +415,14 @@ class PlayerAgent(Agent):
         cfr_action, confidence = self._cfr_lookup(observation)
 
         if cfr_action is None:
-            # CFR miss → pure fallback
-            return self._fallback_action(observation)
+            return self._clamp_raise(self._fallback_action(observation), observation)
 
         if confidence >= 0.8:
-            # High confidence → trust CFR
-            return cfr_action
+            return self._clamp_raise(cfr_action, observation)
 
-        # Low/medium confidence → coin flip weighted by confidence
         if random.random() < confidence:
-            return cfr_action
-        return self._fallback_action(observation)
+            return self._clamp_raise(cfr_action, observation)
+        return self._clamp_raise(self._fallback_action(observation), observation)
 
     def observe(self, observation, reward, terminated, truncated, info):
         """Track opponent actions to maintain history."""
