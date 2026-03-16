@@ -46,8 +46,8 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
 
     if (num_threads > 1) {
-        // Parallel training (lock-free Pluribus approach)
-        trainer.train_parallel(iterations, num_threads);
+        // Parallel training with periodic checkpoint saving
+        trainer.train_parallel(iterations, num_threads, output, checkpoint, 1000000);
     } else {
         // Single-threaded with progress
         int print_every = std::max(1, iterations / 20);

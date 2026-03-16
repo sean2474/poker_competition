@@ -516,17 +516,52 @@ struct CFRTrainer {
         iterations.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void train_parallel(int num_iterations, int num_threads) {
-        // Pre-warm: run single-threaded first to populate most nodes
-        // This reduces lock contention during parallel phase
+    const char* _save_output = nullptr;
+    const char* _save_checkpoint = nullptr;
+
+    void train_parallel(int num_iterations, int num_threads,
+                        const char* output_path = nullptr,
+                        const char* checkpoint_path = nullptr,
+                        int save_every = 1000000) {
+        _save_output = output_path;
+        _save_checkpoint = checkpoint_path;
+
+        // Pre-warm single-threaded
         int warmup = std::min(1000, num_iterations / 10);
         for (int i = 0; i < warmup; i++) train_one();
         int remaining = num_iterations - warmup;
 
+        // Progress + periodic save thread
+        std::atomic<bool> done{false};
+        std::thread monitor([&]() {
+            int last_saved = iterations.load();
+            auto t0 = std::chrono::steady_clock::now();
+            while (!done) {
+                std::this_thread::sleep_for(std::chrono::seconds(30));
+                int cur = iterations.load();
+                auto t1 = std::chrono::steady_clock::now();
+                double elapsed = std::chrono::duration<double>(t1 - t0).count();
+                double ips = cur / elapsed;
+                std::cout << "  progress: " << cur << "/" << (warmup + remaining)
+                          << "  " << nodes.size() << " nodes  "
+                          << ips << " it/s" << std::endl;
+
+                // Save checkpoint periodically
+                if (save_every > 0 && cur - last_saved >= save_every) {
+                    if (output_path) {
+                        std::cout << "  [saving checkpoint at " << cur << " iters]" << std::endl;
+                        save_binary(output_path);
+                        if (checkpoint_path) save_checkpoint(checkpoint_path);
+                    }
+                    last_saved = cur;
+                }
+            }
+        });
+
+        // Worker threads
         std::vector<std::thread> threads;
         int per_thread = remaining / num_threads;
         int extra = remaining % num_threads;
-
         for (int t = 0; t < num_threads; t++) {
             int count = per_thread + (t < extra ? 1 : 0);
             threads.emplace_back([this, count]() {
@@ -536,6 +571,8 @@ struct CFRTrainer {
             });
         }
         for (auto& t : threads) t.join();
+        done = true;
+        monitor.join();
     }
 
     // Save binary format for Python conversion
