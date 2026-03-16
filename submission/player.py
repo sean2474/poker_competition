@@ -541,38 +541,6 @@ class PlayerAgent(Agent):
                 use_cfr = True
 
         if use_cfr and cfr_action is not None:
-            # Sizing subgame: refine bet amount if it's a raise action
-            action_type, amount, k1, k2 = cfr_action
-            if action_type == _RAISE and cfr_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE"):
-                # Quick equity for sizing (50 sims)
-                hand = self.my_hand_2 if self.my_hand_2 else [c for c in observation["my_cards"] if c != -1][:2]
-                community = [c for c in observation["community_cards"] if c != -1]
-                eq = 0.5
-                if len(hand) == 2 and community:
-                    from abstractions.card_utils import get_evaluator, int_to_treys, ALL_CARDS
-                    ev = get_evaluator()
-                    dead_set = set(hand) | set(community)
-                    for c in self.my_discards:
-                        if c >= 0: dead_set.add(c)
-                    for c in self.opp_discards:
-                        if c >= 0: dead_set.add(c)
-                    rem = [c for c in ALL_CARDS if c not in dead_set]
-                    bn = 5 - len(community)
-                    if len(rem) >= bn + 2:
-                        my_h = [int_to_treys(c) for c in hand]
-                        w = t = 0
-                        for _ in range(50):
-                            s = random.sample(rem, bn + 2)
-                            fb = community + s[:bn]
-                            op = s[bn:]
-                            b = [int_to_treys(c) for c in fb]
-                            oh = [int_to_treys(c) for c in op]
-                            if ev.evaluate(my_h, b) < ev.evaluate(oh, b): w += 1
-                            t += 1
-                        eq = w / t if t > 0 else 0.5
-                amount = self._refine_bet_size(cfr_abs, observation, equity=eq)
-                cfr_action = (action_type, amount, k1, k2)
-
             self.street_history += action_to_short(cfr_abs)
             if cfr_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
                 self.hero_last_raiser = True
