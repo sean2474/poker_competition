@@ -110,107 +110,104 @@ def solve_subgame(my_hand: list, community: list,
 
     # Pre-compute equities (the value function)
     eq = _compute_equities(my_hand, community, opp_hands, num_sims=80)
-    # Convert to signed EV multiplier: eq=0.7 → ev_mult=0.4, eq=0.3 → ev_mult=-0.4
-    ev_mult = 2.0 * eq - 1.0  # range [-1, 1]
+    ev_mult = 2.0 * eq - 1.0  # signed: [-1, 1]
 
-    # Regret tables
-    hero_regret = np.zeros(n_hero)
-    hero_strat_sum = np.zeros(n_hero)
-
-    opp_regret_after_check = np.zeros((n_opp, 3))  # CHECK/BET_S/BET_L
-    opp_regret_after_bets = np.zeros((n_opp, 3))   # FOLD/CALL/RAISE
-    opp_regret_after_betl = np.zeros((n_opp, 2))   # FOLD/CALL
-    hero_regret_facing_bet = np.zeros(2)            # FOLD/CALL
-
-    # Initialize opp regrets with equity-based priors
-    # This avoids the cold-start problem where opp starts with uniform (too much raise)
+    # Cluster opponent hands into equity buckets for faster convergence
+    # Instead of 20 individual strategies, use 4 buckets
+    OPP_BUCKETS = 4
+    bucket_bounds = [0.0, 0.3, 0.5, 0.7, 1.01]
+    opp_bucket = np.zeros(n_opp, dtype=int)
+    bucket_weight = np.zeros(OPP_BUCKETS)
+    bucket_ev = np.zeros(OPP_BUCKETS)  # avg ev_mult per bucket
     for oi in range(n_opp):
         opp_eq = 1.0 - eq[oi]  # opponent's equity
-        # After hero bets: opp should fold weak, call medium, raise strong
-        opp_regret_after_bets[oi] = np.array([
-            max(0.5 - opp_eq, 0) * 10,   # FOLD: high regret if weak
-            opp_eq * 5,                    # CALL: proportional to equity
-            max(opp_eq - 0.6, 0) * 10     # RAISE: only if strong
-        ])
-        opp_regret_after_betl[oi] = np.array([
-            max(0.5 - opp_eq, 0) * 10,   # FOLD
-            opp_eq * 5                     # CALL
-        ])
-        # After hero checks: opp should check weak, bet strong
-        opp_regret_after_check[oi] = np.array([
-            max(0.5 - opp_eq, 0) * 5,    # CHECK
-            opp_eq * 3,                    # BET_S
-            max(opp_eq - 0.7, 0) * 5      # BET_L
-        ])
+        for bi in range(OPP_BUCKETS):
+            if bucket_bounds[bi] <= opp_eq < bucket_bounds[bi + 1]:
+                opp_bucket[oi] = bi
+                break
+        bucket_weight[opp_bucket[oi]] += opp_w[oi]
+        bucket_ev[opp_bucket[oi]] += opp_w[oi] * ev_mult[oi]
+    for bi in range(OPP_BUCKETS):
+        if bucket_weight[bi] > 0:
+            bucket_ev[bi] /= bucket_weight[bi]
+
+    # Regret tables — per bucket instead of per hand
+    hero_regret = np.zeros(n_hero)
+    hero_strat_sum = np.zeros(n_hero)
+    opp_regret_after_check = np.zeros((OPP_BUCKETS, 3))
+    opp_regret_after_bets = np.zeros((OPP_BUCKETS, 3))
+    opp_regret_after_betl = np.zeros((OPP_BUCKETS, 2))
+    hero_regret_facing_bet = np.zeros(2)
 
     stake = min(my_bet, opp_bet)
 
     for _t in range(num_iters):
-        # Hero root strategy
         pos = np.maximum(hero_regret, 0)
         tot = pos.sum()
         h_strat = pos / tot if tot > 0 else np.ones(n_hero) / n_hero
-        hero_strat_sum += h_strat * max(_t, 1)  # linear weighting
+        hero_strat_sum += h_strat * max(_t, 1)
 
-        # Hero facing-bet strategy
         pos_fb = np.maximum(hero_regret_facing_bet, 0)
         tot_fb = pos_fb.sum()
         h_fb = pos_fb / tot_fb if tot_fb > 0 else np.array([0.5, 0.5])
 
         action_evs = np.zeros(n_hero)
 
-        for oi in range(n_opp):
-            w = opp_w[oi]
-            sd = ev_mult[oi]  # signed equity multiplier
+        for bi in range(OPP_BUCKETS):
+            w = bucket_weight[bi]
+            if w < 1e-6:
+                continue
+            sd = bucket_ev[bi]
+
+            # Opp strategy from bucket regret
+            op_c = np.maximum(opp_regret_after_check[bi], 0)
+            ot_c = op_c.sum()
+            o_sc = op_c / ot_c if ot_c > 0 else np.ones(3) / 3
+
+            op_bs = np.maximum(opp_regret_after_bets[bi], 0)
+            ot_bs = op_bs.sum()
+            o_sbs = op_bs / ot_bs if ot_bs > 0 else np.ones(3) / 3
+
+            op_bl = np.maximum(opp_regret_after_betl[bi], 0)
+            ot_bl = op_bl.sum()
+            o_sbl = op_bl / ot_bl if ot_bl > 0 else np.array([0.5, 0.5])
 
             if facing_bet:
                 evs = []
-                evs.append(-my_bet)       # FOLD: lose what we put in
-                evs.append(sd * opp_bet)  # CALL: showdown at opp_bet level
+                evs.append(-my_bet)
+                evs.append(sd * opp_bet)
 
                 if "RAISE_S" in hero_actions:
-                    op = np.maximum(opp_regret_after_bets[oi], 0)
-                    ot = op.sum()
-                    o_s = op / ot if ot > 0 else np.ones(3) / 3
                     new_bet = opp_bet + bet_s
-                    ev_f = opp_bet                              # opp folds → we win their bet
-                    ev_c = sd * new_bet                         # opp calls → showdown
-                    ev_r = sd * min(new_bet + bet_s, 100)       # opp re-raises → approx
-                    evs.append(o_s[0]*ev_f + o_s[1]*ev_c + o_s[2]*ev_r)
+                    ev_f = opp_bet
+                    ev_c = sd * new_bet
+                    ev_r = sd * min(new_bet + bet_s, 100)
+                    evs.append(o_sbs[0]*ev_f + o_sbs[1]*ev_c + o_sbs[2]*ev_r)
 
                     opp_evs = np.array([-opp_bet, -sd*new_bet, -sd*min(new_bet+bet_s, 100)])
-                    opp_avg = np.dot(o_s, opp_evs)
-                    opp_regret_after_bets[oi] = np.maximum(
-                        opp_regret_after_bets[oi] + w*(opp_evs - opp_avg), 0)
+                    opp_avg = np.dot(o_sbs, opp_evs)
+                    opp_regret_after_bets[bi] = np.maximum(
+                        opp_regret_after_bets[bi] + w*(opp_evs - opp_avg), 0)
 
                 if "RAISE_L" in hero_actions:
                     new_bet = opp_bet + bet_l
-                    op2 = np.maximum(opp_regret_after_betl[oi], 0)
-                    ot2 = op2.sum()
-                    o_s2 = op2 / ot2 if ot2 > 0 else np.array([0.5, 0.5])
                     ev_f = opp_bet
                     ev_c = sd * new_bet
-                    evs.append(o_s2[0]*ev_f + o_s2[1]*ev_c)
+                    evs.append(o_sbl[0]*ev_f + o_sbl[1]*ev_c)
 
                     opp_evs2 = np.array([-opp_bet, -sd*new_bet])
-                    opp_avg2 = np.dot(o_s2, opp_evs2)
-                    opp_regret_after_betl[oi] = np.maximum(
-                        opp_regret_after_betl[oi] + w*(opp_evs2 - opp_avg2), 0)
+                    opp_avg2 = np.dot(o_sbl, opp_evs2)
+                    opp_regret_after_betl[bi] = np.maximum(
+                        opp_regret_after_betl[bi] + w*(opp_evs2 - opp_avg2), 0)
 
                 for ai in range(len(evs)):
                     action_evs[ai] += w * evs[ai]
 
             else:
-                # Hero first: CHECK / BET_S / BET_L
-
                 # ─ CHECK ─
-                op_c = np.maximum(opp_regret_after_check[oi], 0)
-                ot_c = op_c.sum()
-                o_sc = op_c / ot_c if ot_c > 0 else np.ones(3) / 3
-
-                ev_cc = sd * stake                                                      # both check
-                ev_obs = h_fb[0]*(-my_bet) + h_fb[1]*(sd*(stake + bet_s))              # opp bets small
-                ev_obl = h_fb[0]*(-my_bet) + h_fb[1]*(sd*(stake + bet_l))              # opp bets large
+                ev_cc = sd * stake
+                ev_obs = h_fb[0]*(-my_bet) + h_fb[1]*(sd*(stake + bet_s))
+                ev_obl = h_fb[0]*(-my_bet) + h_fb[1]*(sd*(stake + bet_l))
                 ev_check = o_sc[0]*ev_cc + o_sc[1]*ev_obs + o_sc[2]*ev_obl
 
                 opp_evs_c = np.array([
@@ -219,8 +216,8 @@ def solve_subgame(my_hand: list, community: list,
                     -(h_fb[0]*(-opp_bet) + h_fb[1]*(-sd*(stake+bet_l)))
                 ])
                 opp_avg_c = np.dot(o_sc, opp_evs_c)
-                opp_regret_after_check[oi] = np.maximum(
-                    opp_regret_after_check[oi] + w*(opp_evs_c - opp_avg_c), 0)
+                opp_regret_after_check[bi] = np.maximum(
+                    opp_regret_after_check[bi] + w*(opp_evs_c - opp_avg_c), 0)
 
                 if o_sc[1] + o_sc[2] > 0.01:
                     fb_evs = np.array([-my_bet, sd*(stake + bet_s)])
@@ -233,41 +230,32 @@ def solve_subgame(my_hand: list, community: list,
                 # ─ BET_S ─
                 if "BET_S" in hero_actions:
                     idx = hero_actions.index("BET_S")
-                    op_bs = np.maximum(opp_regret_after_bets[oi], 0)
-                    ot_bs = op_bs.sum()
-                    o_sbs = op_bs / ot_bs if ot_bs > 0 else np.ones(3) / 3
-
-                    ev_f = opp_bet                                    # opp folds
-                    ev_c = sd * (stake + bet_s)                       # opp calls
-                    ev_r = sd * min(stake + bet_s*2, 100)             # opp raises
+                    ev_f = opp_bet
+                    ev_c = sd * (stake + bet_s)
+                    ev_r = sd * min(stake + bet_s*2, 100)
                     ev_bets = o_sbs[0]*ev_f + o_sbs[1]*ev_c + o_sbs[2]*ev_r
 
                     opp_evs_bs = np.array([-opp_bet, -sd*(stake+bet_s), -sd*min(stake+bet_s*2, 100)])
                     opp_avg_bs = np.dot(o_sbs, opp_evs_bs)
-                    opp_regret_after_bets[oi] = np.maximum(
-                        opp_regret_after_bets[oi] + w*(opp_evs_bs - opp_avg_bs), 0)
+                    opp_regret_after_bets[bi] = np.maximum(
+                        opp_regret_after_bets[bi] + w*(opp_evs_bs - opp_avg_bs), 0)
 
                     action_evs[idx] += w * ev_bets
 
                 # ─ BET_L ─
                 if "BET_L" in hero_actions:
                     idx = hero_actions.index("BET_L")
-                    op_bl = np.maximum(opp_regret_after_betl[oi], 0)
-                    ot_bl = op_bl.sum()
-                    o_sbl = op_bl / ot_bl if ot_bl > 0 else np.array([0.5, 0.5])
-
-                    ev_f = opp_bet                          # opp folds
-                    ev_c = sd * (stake + bet_l)              # opp calls
+                    ev_f = opp_bet
+                    ev_c = sd * (stake + bet_l)
                     ev_betl = o_sbl[0]*ev_f + o_sbl[1]*ev_c
 
                     opp_evs_bl = np.array([-opp_bet, -sd*(stake+bet_l)])
                     opp_avg_bl = np.dot(o_sbl, opp_evs_bl)
-                    opp_regret_after_betl[oi] = np.maximum(
-                        opp_regret_after_betl[oi] + w*(opp_evs_bl - opp_avg_bl), 0)
+                    opp_regret_after_betl[bi] = np.maximum(
+                        opp_regret_after_betl[bi] + w*(opp_evs_bl - opp_avg_bl), 0)
 
                     action_evs[idx] += w * ev_betl
 
-        # Update hero regret
         avg_ev = np.dot(h_strat, action_evs)
         hero_regret = np.maximum(hero_regret + (action_evs - avg_ev), 0)
 
