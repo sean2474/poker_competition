@@ -1,18 +1,17 @@
 """
-Post-discard Full CFR solver.
+Multi-street post-discard CFR solver.
 
-Unlike MCCFR which samples one hand per iteration, this enumerates ALL
-possible opponent hands and updates all strategies simultaneously.
-This is the PioSolver/GTO Wizard approach.
+Recursively solves from current street through river.
+Each iteration samples a board runout and traverses the complete
+game tree with proper terminal payoffs.
 
-Post-discard state space is small enough:
-  - 27 cards total, 5 board + 3 hero discard + 3 opp discard = 11 dead
-  - Remaining: 16 cards, opp has 2 → C(16,2) = 120 possible opp hands
-  - River: exact showdown (no MC needed)
-  - Turn: enumerate 1 river card = ~14 runouts
-  - Flop: enumerate 2 cards = ~C(14,2) = 91 runouts
+Key differences from 1-street solver:
+  - Bet on flop → future streets have value (not just showdown)
+  - Building pot early = more to win later
+  - This is why strong hands should bet: they build the pot for future streets
 
-With 120 opp hands × 100 iterations → converges in milliseconds.
+State space: ~105 opp hands × 3 streets × ~8 nodes/street = manageable
+Time budget: ~200ms per decision
 """
 
 import random
@@ -24,10 +23,11 @@ _FOLD = 0
 _RAISE = 1
 _CHECK = 2
 _CALL = 3
+MAX_BET = 100
+BIG_BLIND = 2
 
 
 def _enumerate_opp_hands(my_hand, community, my_discards, opp_discards):
-    """Enumerate all possible opponent 2-card hands."""
     dead = set(my_hand) | set(community)
     for c in my_discards:
         if c >= 0: dead.add(c)
@@ -37,238 +37,286 @@ def _enumerate_opp_hands(my_hand, community, my_discards, opp_discards):
     return list(combinations(remaining, 2)), remaining
 
 
-def _compute_exact_equities(my_hand, community, opp_hands_list, remaining):
-    """
-    Compute exact equity for each opp hand.
-    River: exact showdown. Turn/Flop: enumerate all runouts.
-    """
-    ev = get_evaluator()
+def _showdown_value(my_hand, opp, community, evaluator):
+    """Returns hero payoff multiplier: +1 win, -1 lose, 0 tie."""
     my_h = [int_to_treys(c) for c in my_hand]
-    board_need = 5 - len(community)
-    n = len(opp_hands_list)
-    equities = np.zeros(n)
-
-    if board_need == 0:
-        # River: exact
-        b = [int_to_treys(c) for c in community]
-        mr = ev.evaluate(my_h, b)
-        for oi, opp in enumerate(opp_hands_list):
-            opp_h = [int_to_treys(c) for c in opp]
-            opr = ev.evaluate(opp_h, b)
-            equities[oi] = 1.0 if mr < opr else (0.5 if mr == opr else 0.0)
-    else:
-        # Turn/Flop: enumerate runouts
-        for oi, opp in enumerate(opp_hands_list):
-            opp_h = [int_to_treys(c) for c in opp]
-            opp_set = set(opp)
-            board_cards = [c for c in remaining if c not in opp_set]
-
-            if len(board_cards) < board_need:
-                equities[oi] = 0.5
-                continue
-
-            # Enumerate all runouts (or sample if too many)
-            if board_need == 1:
-                runouts = [[c] for c in board_cards]
-            elif board_need == 2:
-                runouts = list(combinations(board_cards, 2))
-                if len(runouts) > 100:
-                    runouts = random.sample(runouts, 100)
-            else:
-                runouts = [random.sample(board_cards, board_need) for _ in range(50)]
-
-            wins = ties = 0
-            for extra in runouts:
-                b = [int_to_treys(c) for c in list(community) + list(extra)]
-                mr = ev.evaluate(my_h, b)
-                opr = ev.evaluate(opp_h, b)
-                if mr < opr: wins += 1
-                elif mr == opr: ties += 1
-            total = len(runouts)
-            equities[oi] = (wins + 0.5 * ties) / total if total > 0 else 0.5
-
-    return equities
+    opp_h = [int_to_treys(c) for c in opp]
+    b = [int_to_treys(c) for c in community]
+    mr = evaluator.evaluate(my_h, b)
+    opr = evaluator.evaluate(opp_h, b)
+    if mr < opr: return 1.0
+    if mr > opr: return -1.0
+    return 0.0
 
 
-def solve_subgame(my_hand, community, my_bet, opp_bet, min_raise, max_raise,
-                   valid_actions, opp_hands, opp_weights=None,
-                   num_iters=150, my_discards=None, opp_discards=None):
+class MultiStreetNode:
+    """A decision node in the multi-street game tree."""
+    __slots__ = ['regret', 'strat_sum', 'n_actions']
+
+    def __init__(self, n_actions):
+        self.n_actions = n_actions
+        self.regret = np.zeros(n_actions)
+        self.strat_sum = np.zeros(n_actions)
+
+    def get_strategy(self, t):
+        pos = np.maximum(self.regret, 0)
+        total = pos.sum()
+        strat = pos / total if total > 0 else np.ones(self.n_actions) / self.n_actions
+        self.strat_sum += strat * max(t, 1)
+        return strat
+
+    def get_average(self):
+        total = self.strat_sum.sum()
+        return self.strat_sum / total if total > 0 else np.ones(self.n_actions) / self.n_actions
+
+
+class MultiStreetSolver:
     """
-    Full CFR post-discard solver.
-
-    Enumerates ALL possible opp hands, computes exact equity,
-    runs CFR with per-hand opponent strategies.
-
-    Returns (action_type, raise_amount).
+    Multi-street CFR solver. Traverses flop→turn→river betting tree.
     """
-    pot = my_bet + opp_bet
-    can_raise = valid_actions[_RAISE] and max_raise > 0
-    facing_bet = (opp_bet > my_bet)
-    stake = min(my_bet, opp_bet)
 
-    # Enumerate all opp hands if not provided
-    if not opp_hands:
-        my_disc = my_discards or []
-        opp_disc = opp_discards or []
-        opp_hands, remaining = _enumerate_opp_hands(my_hand, community, my_disc, opp_disc)
-    else:
-        dead = set(my_hand) | set(community)
-        remaining = [c for c in ALL_CARDS if c not in dead]
+    def __init__(self, my_hand, community, my_discards, opp_discards):
+        self.my_hand = my_hand
+        self.community = list(community)
+        self.evaluator = get_evaluator()
 
-    n_opp = len(opp_hands)
-    if n_opp == 0:
-        return None, None
+        # Enumerate opp hands
+        self.opp_hands, self.remaining = _enumerate_opp_hands(
+            my_hand, community, my_discards or [], opp_discards or []
+        )
+        self.n_opp = len(self.opp_hands)
 
-    # Bet sizes
-    bet_sizes = []
-    if can_raise:
-        for frac in [0.33, 0.67, 1.0]:
+        # CFR nodes: keyed by (player, street, bets_tuple, opp_idx)
+        self.nodes = {}
+
+    def _get_node(self, key, n_actions):
+        if key not in self.nodes:
+            self.nodes[key] = MultiStreetNode(n_actions)
+        return self.nodes[key]
+
+    def _bet_sizes(self, pot, max_raise, min_raise):
+        if max_raise <= 0 or max_raise < min_raise:
+            return []
+        sizes = []
+        for frac in [0.5, 1.0]:
             amt = max(min_raise, min(int(pot * frac), max_raise))
-            if amt not in bet_sizes:
-                bet_sizes.append(amt)
+            if amt not in sizes:
+                sizes.append(amt)
+        return sizes
 
-    # Hero actions
-    if facing_bet:
-        hero_actions = ["FOLD", "CALL"]
-        hero_amounts = [0, 0]
-        for sz in bet_sizes:
-            hero_actions.append(f"RAISE_{sz}")
-            hero_amounts.append(sz)
-    else:
-        hero_actions = ["CHECK"]
-        hero_amounts = [0]
-        for sz in bet_sizes:
-            hero_actions.append(f"BET_{sz}")
-            hero_amounts.append(sz)
+    def solve(self, my_bet, opp_bet, min_raise, street, num_iters=100):
+        """Run multi-street CFR. Returns (action_type, amount)."""
+        for t in range(num_iters):
+            # Sample board runout for remaining streets
+            for oi in range(self.n_opp):
+                opp = self.opp_hands[oi]
+                opp_set = set(opp)
+                deck = [c for c in self.remaining if c not in opp_set]
 
-    n_hero = len(hero_actions)
-    if n_hero <= 1:
-        return None, None
+                # Deal remaining board cards
+                board_need = 5 - len(self.community)
+                if board_need > 0 and len(deck) >= board_need:
+                    extra = random.sample(deck, board_need)
+                else:
+                    extra = []
+                full_board = self.community + extra
 
-    # Opp weights (discard-aware if available)
-    if opp_weights and len(opp_weights) == n_opp:
-        w_total = sum(opp_weights)
-        opp_w = np.array([w / w_total for w in opp_weights]) if w_total > 0 else np.ones(n_opp) / n_opp
-    else:
-        opp_w = np.ones(n_opp) / n_opp
+                # Traverse from current street
+                self._cfr_traverse(
+                    oi, opp, full_board, my_bet, opp_bet, min_raise,
+                    street, is_hero_turn=True, t=t
+                )
 
-    # Compute equities (exact on river, enumerated on turn/flop)
-    eq = _compute_exact_equities(my_hand, community, opp_hands, remaining)
-    ev_mult = 2.0 * eq - 1.0  # hero's signed EV multiplier per opp hand
+        # Get root strategy
+        pot = my_bet + opp_bet
+        max_raise = MAX_BET - max(my_bet, opp_bet)
+        bet_sizes = self._bet_sizes(pot, max_raise, min_raise)
 
-    # Regret tables: PER OPP HAND (not bucketed — full enumeration)
-    hero_regret = np.zeros(n_hero)
-    hero_strat_sum = np.zeros(n_hero)
+        to_call = opp_bet - my_bet
+        if to_call > 0:
+            actions = ["FOLD", "CALL"] + [f"RAISE_{s}" for s in bet_sizes]
+            amounts = [0, 0] + list(bet_sizes)
+        else:
+            actions = ["CHECK"] + [f"BET_{s}" for s in bet_sizes]
+            amounts = [0] + list(bet_sizes)
 
-    # Opp response: per hand, per bet size → [FOLD, CALL]
-    n_bets = len(bet_sizes)
-    opp_regret_vs_bet = np.zeros((n_opp, max(n_bets, 1), 2))
+        # Average over all opp hands
+        avg_strat = np.zeros(len(actions))
+        for oi in range(self.n_opp):
+            key = ("hero", street, (my_bet, opp_bet), oi)
+            node = self._get_node(key, len(actions))
+            avg_strat += node.get_average()
+        avg_strat /= self.n_opp
 
-    # Opp response after hero check: [CHECK_BACK, BET_sz1, BET_sz2, ...]
-    n_opp_check_acts = n_bets + 1
-    opp_regret_after_check = np.zeros((n_opp, n_opp_check_acts))
-    hero_facing_regret = np.zeros(2)  # FOLD/CALL when opp bets
+        total = avg_strat.sum()
+        if total > 0:
+            avg_strat /= total
 
-    for _t in range(num_iters):
-        # Hero strategy
-        pos = np.maximum(hero_regret, 0)
-        tot = pos.sum()
-        h_strat = pos / tot if tot > 0 else np.ones(n_hero) / n_hero
-        hero_strat_sum += h_strat * max(_t, 1)
+        chosen = random.choices(range(len(actions)), weights=avg_strat.tolist(), k=1)[0]
+        amt = amounts[chosen]
 
-        # Hero facing bet
-        pos_fb = np.maximum(hero_facing_regret, 0)
-        tot_fb = pos_fb.sum()
-        h_fb = pos_fb / tot_fb if tot_fb > 0 else np.array([0.5, 0.5])
+        if actions[chosen] == "FOLD":
+            return (_FOLD, 0)
+        elif actions[chosen] == "CHECK":
+            return (_CHECK, 0)
+        elif actions[chosen] == "CALL":
+            return (_CALL, 0)
+        else:
+            return (_RAISE, amt)
 
-        action_evs = np.zeros(n_hero)
+    def _cfr_traverse(self, oi, opp, full_board, my_bet, opp_bet,
+                       min_raise, street, is_hero_turn, t):
+        """
+        Recursive CFR traversal through multi-street game tree.
+        Returns hero EV for this subtree.
+        """
+        pot = my_bet + opp_bet
+        max_raise = MAX_BET - max(my_bet, opp_bet)
+        to_call = (opp_bet - my_bet) if is_hero_turn else (my_bet - opp_bet)
 
-        # Full enumeration over ALL opp hands
-        for oi in range(n_opp):
-            w = opp_w[oi]
-            sd = ev_mult[oi]
+        # Terminal: street > 3 = showdown
+        if street > 3:
+            board5 = full_board[:5]
+            sd = _showdown_value(self.my_hand, opp, board5, self.evaluator)
+            stake = min(my_bet, opp_bet)
+            return sd * stake
 
-            if facing_bet:
-                action_evs[0] += w * (-my_bet)      # FOLD
-                action_evs[1] += w * (sd * opp_bet)  # CALL
+        bet_sizes = self._bet_sizes(pot, max_raise, min_raise)
 
-                for si, sz in enumerate(bet_sizes):
-                    ai = 2 + si
-                    new_bet = opp_bet + sz
-                    op = np.maximum(opp_regret_vs_bet[oi, si], 0)
-                    ot = op.sum()
-                    o_s = op / ot if ot > 0 else np.array([0.5, 0.5])
-
-                    ev_f = opp_bet
-                    ev_c = sd * new_bet
-                    action_evs[ai] += w * (o_s[0]*ev_f + o_s[1]*ev_c)
-
-                    # Update opp regret
-                    opp_evs = np.array([-opp_bet, -sd*new_bet])
-                    opp_avg = np.dot(o_s, opp_evs)
-                    opp_regret_vs_bet[oi, si] = np.maximum(
-                        opp_regret_vs_bet[oi, si] + (opp_evs - opp_avg), 0)
+        if is_hero_turn:
+            if to_call > 0:
+                actions_n = 2 + len(bet_sizes)  # FOLD, CALL, RAISE...
             else:
-                # CHECK
-                op_c = np.maximum(opp_regret_after_check[oi, :n_opp_check_acts], 0)
-                ot_c = op_c.sum()
-                o_sc = op_c / ot_c if ot_c > 0 else np.ones(n_opp_check_acts) / n_opp_check_acts
+                actions_n = 1 + len(bet_sizes)  # CHECK, BET...
 
-                ev_cc = sd * stake
-                ev_check = o_sc[0] * ev_cc
-                for osi, osz in enumerate(bet_sizes):
-                    ev_opp_bet = h_fb[0]*(-my_bet) + h_fb[1]*(sd*(stake + osz))
-                    ev_check += o_sc[1+osi] * ev_opp_bet
+            key = ("hero", street, (my_bet, opp_bet), oi)
+            node = self._get_node(key, actions_n)
+            strat = node.get_strategy(t)
 
-                # Opp regret after check
-                opp_evs_c = np.zeros(n_opp_check_acts)
-                opp_evs_c[0] = -sd * stake
-                for osi, osz in enumerate(bet_sizes):
-                    opp_evs_c[1+osi] = -(h_fb[0]*(-opp_bet) + h_fb[1]*(-sd*(stake+osz)))
-                opp_avg_c = np.dot(o_sc, opp_evs_c)
-                opp_regret_after_check[oi, :n_opp_check_acts] = np.maximum(
-                    opp_regret_after_check[oi, :n_opp_check_acts] + (opp_evs_c - opp_avg_c), 0)
+            action_evs = np.zeros(actions_n)
 
-                # Hero facing-bet regret
-                if np.sum(o_sc[1:]) > 0.01 and n_bets > 0:
-                    avg_sz = sum(o_sc[1+i]*bet_sizes[i] for i in range(n_bets)) / max(np.sum(o_sc[1:]), 0.01)
-                    fb_evs = np.array([-my_bet, sd*(stake + avg_sz)])
-                    fb_avg = np.dot(h_fb, fb_evs)
-                    hero_facing_regret = np.maximum(hero_facing_regret + w*(fb_evs - fb_avg), 0)
+            if to_call > 0:
+                # FOLD
+                action_evs[0] = -my_bet
 
-                action_evs[0] += w * ev_check
+                # CALL → advance street (or showdown if river)
+                new_my = opp_bet
+                if street == 3:
+                    # River call → showdown
+                    sd = _showdown_value(self.my_hand, opp, full_board[:5], self.evaluator)
+                    action_evs[1] = sd * new_my
+                else:
+                    action_evs[1] = self._cfr_traverse(
+                        oi, opp, full_board, new_my, opp_bet,
+                        BIG_BLIND, street + 1, False, t  # opp acts first next street
+                    )
+
+                # RAISE sizes
+                for si, sz in enumerate(bet_sizes):
+                    new_my = opp_bet + sz
+                    action_evs[2 + si] = self._cfr_traverse(
+                        oi, opp, full_board, new_my, opp_bet,
+                        min(sz, max_raise), street, False, t  # opp responds
+                    )
+            else:
+                # CHECK → opp turn
+                action_evs[0] = self._cfr_traverse(
+                    oi, opp, full_board, my_bet, opp_bet,
+                    min_raise, street, False, t  # opp acts
+                )
 
                 # BET sizes
                 for si, sz in enumerate(bet_sizes):
-                    ai = 1 + si
-                    op_b = np.maximum(opp_regret_vs_bet[oi, si], 0)
-                    ot_b = op_b.sum()
-                    o_sb = op_b / ot_b if ot_b > 0 else np.array([0.5, 0.5])
+                    new_my = my_bet + sz
+                    action_evs[1 + si] = self._cfr_traverse(
+                        oi, opp, full_board, new_my, opp_bet,
+                        min(sz, max_raise), street, False, t  # opp responds
+                    )
 
-                    ev_f = opp_bet
-                    ev_c = sd * (stake + sz)
-                    action_evs[ai] += w * (o_sb[0]*ev_f + o_sb[1]*ev_c)
+            ev = np.dot(strat, action_evs)
+            node.regret = np.maximum(node.regret + (action_evs - ev), 0)
+            return ev
 
-                    opp_evs_b = np.array([-opp_bet, -sd*(stake+sz)])
-                    opp_avg_b = np.dot(o_sb, opp_evs_b)
-                    opp_regret_vs_bet[oi, si] = np.maximum(
-                        opp_regret_vs_bet[oi, si] + (opp_evs_b - opp_avg_b), 0)
+        else:
+            # Opponent's turn
+            if to_call > 0:
+                actions_n = 2 + len(bet_sizes)
+            else:
+                actions_n = 1 + len(bet_sizes)
 
-        avg_ev = np.dot(h_strat, action_evs)
-        hero_regret = np.maximum(hero_regret + (action_evs - avg_ev), 0)
+            key = ("opp", street, (my_bet, opp_bet), oi)
+            node = self._get_node(key, actions_n)
+            strat = node.get_strategy(t)
 
-    # Average strategy
-    total = hero_strat_sum.sum()
-    final_strat = hero_strat_sum / total if total > 0 else np.ones(n_hero) / n_hero
+            action_evs = np.zeros(actions_n)
 
-    chosen_idx = random.choices(range(n_hero), weights=final_strat.tolist(), k=1)[0]
-    amt = hero_amounts[chosen_idx]
+            if to_call > 0:
+                # OPP FOLD
+                action_evs[0] = opp_bet  # hero wins opp's bet
 
-    if hero_actions[chosen_idx] == "FOLD":
-        return (_FOLD, 0)
-    elif hero_actions[chosen_idx] == "CHECK":
-        return (_CHECK, 0)
-    elif hero_actions[chosen_idx] == "CALL":
-        return (_CALL, 0)
+                # OPP CALL → advance street
+                new_opp = my_bet
+                if street == 3:
+                    sd = _showdown_value(self.my_hand, opp, full_board[:5], self.evaluator)
+                    action_evs[1] = sd * my_bet
+                else:
+                    action_evs[1] = self._cfr_traverse(
+                        oi, opp, full_board, my_bet, new_opp,
+                        BIG_BLIND, street + 1, True, t
+                    )
+
+                # OPP RAISE
+                for si, sz in enumerate(bet_sizes):
+                    new_opp = my_bet + sz
+                    action_evs[2 + si] = self._cfr_traverse(
+                        oi, opp, full_board, my_bet, new_opp,
+                        min(sz, max_raise), street, True, t  # hero responds
+                    )
+            else:
+                # OPP CHECK → advance street (both checked)
+                if street == 3:
+                    sd = _showdown_value(self.my_hand, opp, full_board[:5], self.evaluator)
+                    action_evs[0] = sd * min(my_bet, opp_bet)
+                else:
+                    action_evs[0] = self._cfr_traverse(
+                        oi, opp, full_board, my_bet, opp_bet,
+                        BIG_BLIND, street + 1, True, t  # hero first next street
+                    )
+
+                # OPP BET
+                for si, sz in enumerate(bet_sizes):
+                    new_opp = opp_bet + sz
+                    action_evs[1 + si] = self._cfr_traverse(
+                        oi, opp, full_board, my_bet, new_opp,
+                        min(sz, max_raise), street, True, t  # hero responds
+                    )
+
+            # Opp minimizes hero EV (negate for opp regret)
+            opp_evs = -action_evs
+            opp_ev = np.dot(strat, opp_evs)
+            node.regret = np.maximum(node.regret + (opp_evs - opp_ev), 0)
+            return np.dot(strat, action_evs)  # return hero EV
+
+
+def solve_subgame(my_hand, community, my_bet, opp_bet, min_raise, max_raise,
+                   valid_actions, opp_hands=None, opp_weights=None,
+                   num_iters=100, my_discards=None, opp_discards=None):
+    """
+    Multi-street solver entry point.
+    Returns (action_type, raise_amount).
+    """
+    street = len([c for c in community if c >= 0])
+    if street < 3:
+        street_num = 1  # flop
+    elif street < 4:
+        street_num = 1
+    elif street < 5:
+        street_num = 2  # turn
     else:
-        return (_RAISE, amt)
+        street_num = 3  # river
+
+    solver = MultiStreetSolver(my_hand, community, my_discards, opp_discards)
+    if solver.n_opp == 0:
+        return None, None
+
+    return solver.solve(my_bet, opp_bet, min_raise, street_num, num_iters)
