@@ -128,10 +128,15 @@ def run_one_match(opp_name, opp_path):
         bankroll = result.get("bot0_reward", 0)
         return "WIN" if bankroll > 0 else ("LOSS" if bankroll < 0 else "TIE"), bankroll
     except Exception as e:
-        return f"ERROR", 0
+        print(f"    MATCH ERROR: {e}")
+        return "LOSS", 0
     finally:
         p0.terminate(); p1.terminate()
         p0.join(timeout=3); p1.join(timeout=3)
+        import subprocess
+        subprocess.run(["pkill", "-f", f"uvicorn.*{PORT0}"], capture_output=True)
+        subprocess.run(["pkill", "-f", f"uvicorn.*{PORT1}"], capture_output=True)
+        time.sleep(1)
 
 
 def eval_checkpoint(bin_path, num_matches, data_dir):
