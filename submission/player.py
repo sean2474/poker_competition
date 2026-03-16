@@ -172,7 +172,7 @@ class PlayerAgent(Agent):
         confidence in [0, 1]: how much to trust CFR vs fallback.
         """
         if not self.strategy_loaded:
-            return None, 0.0
+            return None, 0.0, None
 
         my_cards = [c for c in observation["my_cards"] if c != -1]
         community = [c for c in observation["community_cards"] if c != -1]
@@ -204,14 +204,14 @@ class PlayerAgent(Agent):
 
         idx = self.key_to_idx.get(h)
         if idx is None:
-            return None, 0.0
+            return None, 0.0, None
 
         stored_type = self.act_types[idx]
         if stored_type >= len(self.action_lists):
-            return None, 0.0
+            return None, 0.0, None
         stored_actions = list(self.action_lists[stored_type])
         if len(stored_actions) != n or stored_actions != valid_abs:
-            return None, 0.0
+            return None, 0.0, None
 
         # Confidence from strategy_sum total
         conf = 0.0
@@ -232,12 +232,8 @@ class PlayerAgent(Agent):
 
         concrete = abstract_to_concrete(chosen_abs, min_raise, max_raise, my_bet, opp_bet)
 
-        self.street_history += action_to_short(chosen_abs)
-        if chosen_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
-            self.hero_last_raiser = True
-            self.villain_last_raiser = False
-
-        return concrete, conf
+        # Don't update history here — caller decides which action to use
+        return concrete, conf, chosen_abs
 
     def _clamp_raise(self, action, observation):
         """Ensure raise amount is within [min_raise, max_raise]. Prevents invalid folds."""
@@ -472,17 +468,28 @@ class PlayerAgent(Agent):
             return (_DISCARD, 0, ki, kj)
 
         # ─── Betting phase: confidence-based CFR/fallback blending ───
-        cfr_action, confidence = self._cfr_lookup(observation)
+        cfr_result = self._cfr_lookup(observation)
 
-        if cfr_action is None:
+        use_cfr = False
+        cfr_action = None
+        cfr_abs = None
+
+        if cfr_result[0] is not None:
+            cfr_action, confidence, cfr_abs = cfr_result
+            if confidence >= 0.8:
+                use_cfr = True
+            elif random.random() < confidence:
+                use_cfr = True
+
+        if use_cfr and cfr_action is not None:
+            # Update history for CFR action
+            self.street_history += action_to_short(cfr_abs)
+            if cfr_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
+                self.hero_last_raiser = True
+                self.villain_last_raiser = False
+            return self._clamp_raise(cfr_action, observation)
+        else:
             return self._clamp_raise(self._fallback_action(observation), observation)
-
-        if confidence >= 0.8:
-            return self._clamp_raise(cfr_action, observation)
-
-        if random.random() < confidence:
-            return self._clamp_raise(cfr_action, observation)
-        return self._clamp_raise(self._fallback_action(observation), observation)
 
     def observe(self, observation, reward, terminated, truncated, info):
         """Track opponent actions to maintain history."""

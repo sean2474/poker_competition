@@ -169,3 +169,14 @@ cython_debug/
 # Poker engine logs
 logs/
 agent_logs/
+
+# Training data / checkpoints / strategy files
+*.bin
+*.pkl
+*.npy
+*.bin.ready
+training/data/
+training/cpp/train_cfr
+training/cpp/test_cards
+training/cpp/test_abstractions
+submission/data/

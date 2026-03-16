@@ -55,10 +55,9 @@ def convert_bin_to_numpy(bin_path, out_dir):
     iters, num_nodes = struct.unpack_from('<II', data, offset)
     offset += 8
 
-    # Detect format: old (42 bytes/node) or new (50 bytes/node with confidence)
-    expected_old = 8 + num_nodes * 42
-    expected_new = 8 + num_nodes * 50
-    has_confidence = (len(data) == expected_new)
+    # Detect format by per-node byte size
+    per_node = (len(data) - 8) / num_nodes if num_nodes > 0 else 42
+    has_confidence = (per_node >= 49.5)  # ~50 bytes = new format with confidence
 
     keys = np.zeros(num_nodes, dtype=np.uint64)
     act_types = np.zeros(num_nodes, dtype=np.uint8)
@@ -74,6 +73,9 @@ def convert_bin_to_numpy(bin_path, out_dir):
 
         keys[i] = key
         act_types[i] = atype
+        nact = min(nact, MAX_ACTIONS)
+        if nact == 0:
+            continue
         raw = list(avg[:nact])
         total = sum(raw)
         if total > 0:
