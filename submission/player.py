@@ -235,6 +235,65 @@ class PlayerAgent(Agent):
         # Don't update history here — caller decides which action to use
         return concrete, conf, chosen_abs
 
+    def _refine_bet_size(self, chosen_abs, observation, equity=None):
+        """
+        Sizing subgame: CFR chose an abstract action (e.g. BET_LARGE),
+        now pick the exact bet size that maximizes EV.
+        
+        For each candidate size:
+          EV = P(fold) × pot + P(call) × (2*eq-1) × (stake + size)
+        where P(fold) increases with bet size (GTO: fold_freq = size/(size+pot))
+        """
+        min_raise = int(observation["min_raise"])
+        max_raise = int(observation["max_raise"])
+        if max_raise <= 0 or max_raise < min_raise:
+            return min_raise
+
+        pot = int(observation["my_bet"]) + int(observation["opp_bet"])
+        spread = max_raise - min_raise
+        if spread <= 0:
+            return min_raise
+
+        # Define candidate sizes based on action type
+        if chosen_abs in ("BET_LARGE", "RAISE_LARGE"):
+            fracs = [0.55, 0.70, 0.85, 1.0]
+        elif chosen_abs in ("BET_SMALL", "RAISE_SMALL"):
+            fracs = [0.10, 0.20, 0.30, 0.40]
+        else:
+            return min_raise
+
+        candidates = sorted(set(
+            max(min_raise, min(min_raise + int(spread * f), max_raise)) for f in fracs
+        ))
+        if len(candidates) <= 1:
+            return candidates[0] if candidates else min_raise
+
+        # Quick equity if not provided
+        if equity is None:
+            equity = 0.5
+
+        stake = min(int(observation["my_bet"]), int(observation["opp_bet"]))
+        sd = 2.0 * equity - 1.0  # signed EV multiplier
+
+        best_ev = float('-inf')
+        best_size = candidates[len(candidates) // 2]
+
+        for size in candidates:
+            # GTO fold frequency: opponent should fold size/(size+pot) to make us indifferent
+            # But real opponents fold less. Use a conservative estimate.
+            fold_freq = size / (size + pot) if (size + pot) > 0 else 0.3
+            call_freq = 1.0 - fold_freq
+
+            ev_fold = int(observation["opp_bet"])  # win opp's current chips
+            ev_call = sd * (stake + size)           # showdown at bigger pot
+
+            ev = fold_freq * ev_fold + call_freq * ev_call
+            if ev > best_ev:
+                best_ev = ev
+                best_size = size
+
+        return best_size
+
     def _clamp_raise(self, action, observation):
         """Ensure raise amount is within [min_raise, max_raise]. Prevents invalid folds."""
         action_type, amount, k1, k2 = action
@@ -482,7 +541,38 @@ class PlayerAgent(Agent):
                 use_cfr = True
 
         if use_cfr and cfr_action is not None:
-            # Update history for CFR action
+            # Sizing subgame: refine bet amount if it's a raise action
+            action_type, amount, k1, k2 = cfr_action
+            if action_type == _RAISE and cfr_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE"):
+                # Quick equity for sizing (50 sims)
+                hand = self.my_hand_2 if self.my_hand_2 else [c for c in observation["my_cards"] if c != -1][:2]
+                community = [c for c in observation["community_cards"] if c != -1]
+                eq = 0.5
+                if len(hand) == 2 and community:
+                    from abstractions.card_utils import get_evaluator, int_to_treys, ALL_CARDS
+                    ev = get_evaluator()
+                    dead_set = set(hand) | set(community)
+                    for c in self.my_discards:
+                        if c >= 0: dead_set.add(c)
+                    for c in self.opp_discards:
+                        if c >= 0: dead_set.add(c)
+                    rem = [c for c in ALL_CARDS if c not in dead_set]
+                    bn = 5 - len(community)
+                    if len(rem) >= bn + 2:
+                        my_h = [int_to_treys(c) for c in hand]
+                        w = t = 0
+                        for _ in range(50):
+                            s = random.sample(rem, bn + 2)
+                            fb = community + s[:bn]
+                            op = s[bn:]
+                            b = [int_to_treys(c) for c in fb]
+                            oh = [int_to_treys(c) for c in op]
+                            if ev.evaluate(my_h, b) < ev.evaluate(oh, b): w += 1
+                            t += 1
+                        eq = w / t if t > 0 else 0.5
+                amount = self._refine_bet_size(cfr_abs, observation, equity=eq)
+                cfr_action = (action_type, amount, k1, k2)
+
             self.street_history += action_to_short(cfr_abs)
             if cfr_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
                 self.hero_last_raiser = True

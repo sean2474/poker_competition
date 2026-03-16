@@ -134,7 +134,7 @@ def _mc_choose_discard(hand_5, board_3, opp_discards=None, top_k=3, mc_sims=150)
 class SimpleAgent:
     """Lightweight agent that plays using a specific strategy table."""
 
-    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None, use_exact_discard=True):
+    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None, use_exact_discard=True, use_subgame_sizing=False):
         self.name = name
         self.key_to_idx = key_to_idx
         self.probs = probs
@@ -142,6 +142,7 @@ class SimpleAgent:
         self.action_lists = action_lists
         self.confidence = confidence
         self.use_exact_discard = use_exact_discard
+        self.use_subgame_sizing = use_subgame_sizing
         self.reset()
 
     def reset(self):
@@ -350,6 +351,26 @@ class SimpleAgent:
             else:
                 self.street_history += "K"; return (_CHECK, 0, 0, 0) if valid[_CHECK] else (_FOLD, 0, 0, 0)
 
+    def _refine_size(self, chosen_abs, obs):
+        mn = int(obs["min_raise"]); mx = int(obs["max_raise"])
+        if mx <= 0 or mx < mn: return mn
+        pot = int(obs["my_bet"]) + int(obs["opp_bet"])
+        spread = mx - mn
+        if spread <= 0: return mn
+        if chosen_abs in ("BET_LARGE","RAISE_LARGE"): fracs = [0.55,0.70,0.85,1.0]
+        else: fracs = [0.10,0.20,0.30,0.40]
+        cands = sorted(set(max(mn, min(mn+int(spread*f), mx)) for f in fracs))
+        if len(cands) <= 1: return cands[0] if cands else mn
+        # EV: fold_freq × opp_bet + call_freq × sd × (stake+size)
+        stake = min(int(obs["my_bet"]), int(obs["opp_bet"]))
+        sd = 0.0  # neutral if no equity
+        best_ev, best = float('-inf'), cands[1]
+        for sz in cands:
+            ff = sz / (sz + pot) if (sz+pot) > 0 else 0.3
+            ev = ff * int(obs["opp_bet"]) + (1-ff) * sd * (stake+sz)
+            if ev > best_ev: best_ev = ev; best = sz
+        return best
+
     def _clamp(self, action, obs):
         at, amt, k1, k2 = action
         if at == _RAISE:
@@ -391,6 +412,11 @@ class SimpleAgent:
 
             if use_cfr:
                 chosen_abs = cfr_result[2]
+                # Sizing subgame refinement
+                at, amt, k1, k2 = cfr_action
+                if self.use_subgame_sizing and at == _RAISE and chosen_abs in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE"):
+                    amt = self._refine_size(chosen_abs, obs)
+                    cfr_action = (at, amt, k1, k2)
                 self.street_history += action_to_short(chosen_abs)
                 if chosen_abs in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE","JAM"):
                     self.hero_last_raiser = True
@@ -450,6 +476,7 @@ def main():
     parser.add_argument("bin_b", nargs="?", default=None, help="Second checkpoint (omit for self-compare)")
     parser.add_argument("--matches", type=int, default=5)
     parser.add_argument("--self-compare", action="store_true", help="Compare exact vs MC discard on same checkpoint")
+    parser.add_argument("--subgame-compare", action="store_true", help="Compare with vs without sizing subgame")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
@@ -457,6 +484,22 @@ def main():
     print(f"Loading {args.bin_a}...")
     kA, pA, atA, alA, cA, iA, nA = convert_bin(args.bin_a)
     print(f"  → {iA:,} iters, {nA:,} nodes, conf={'YES' if cA is not None else 'NO'}")
+
+    if args.subgame_compare:
+        nameA = "subgame"
+        nameB = "fixed"
+        print(f"\n=== Sizing subgame vs fixed sizing ({args.matches} matches) ===")
+        winsA = winsB = 0
+        for m in range(args.matches):
+            agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA, use_subgame_sizing=True)
+            agentB = SimpleAgent(nameB, kA, pA, atA, alA, cA, use_subgame_sizing=False)
+            reward = run_match(agentA, agentB, num_hands=1000)
+            winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
+            if reward > 0: winsA += 1
+            elif reward < 0: winsB += 1
+            print(f"  Match {m+1}: {winner} wins ({reward:+d})")
+        print(f"\nResult: subgame={winsA}W  fixed={winsB}W  TIE={args.matches-winsA-winsB}")
+        return
 
     if args.self_compare:
         # Same checkpoint, exact discard vs MC discard
