@@ -69,6 +69,20 @@ class GameState:
         s.last_aggressor = self.last_aggressor
         return s
 
+    def get_action_ctx(self) -> str:
+        """Return action context: 'no_bet', 'facing_bet', or 'high_pressure'."""
+        cp = self.current_player
+        opp = 1 - cp
+        to_call = self.bets[opp] - self.bets[cp]
+        max_raise = MAX_BET - max(self.bets)
+        can_raise = max_raise > 0 and self.min_raise <= max_raise
+        if to_call <= 0:
+            return "no_bet"
+        remaining_cap = MAX_BET - max(self.bets)
+        if (remaining_cap > 0 and to_call / remaining_cap > 0.6) or not can_raise:
+            return "high_pressure"
+        return "facing_bet"
+
     def get_valid_actions(self) -> List[str]:
         cp = self.current_player
         opp = 1 - cp
@@ -211,7 +225,7 @@ class CFRTrainer:
         discarded = [hand_5[k] for k in range(5) if k != ki and k != kj]
         return kept, discarded
 
-    def _make_key(self, state, cp, p_hand, p_hand_5, community, opp_disc, p_disc, num_actions):
+    def _make_key(self, state, cp, p_hand, p_hand_5, community, opp_disc, p_disc, ctx_key):
         is_bb = (cp == 1)
         if state.street == 0:
             base = preflop_infoset(p_hand_5, is_bb, state.street_history)
@@ -225,8 +239,7 @@ class CFRTrainer:
                 state.street_history,
                 state.bets[cp], state.bets[1 - cp], dead
             )
-        # Append num_actions to disambiguate states with different action sets
-        return base + (num_actions,)
+        return base + (ctx_key,)
 
     def cfr(self, state, p0_hand, p1_hand, p0_hand_5, p1_hand_5,
             community, p0_disc, p1_disc, reach_0, reach_1):
@@ -251,10 +264,12 @@ class CFRTrainer:
         actions = state.get_valid_actions()
         n = len(actions)
 
+        action_ctx = state.get_action_ctx()
+        ctx_key = (action_ctx, n)
         if cp == 0:
-            key = self._make_key(state, cp, p0_hand, p0_hand_5, community, p1_disc, p0_disc, n)
+            key = self._make_key(state, cp, p0_hand, p0_hand_5, community, p1_disc, p0_disc, ctx_key)
         else:
-            key = self._make_key(state, cp, p1_hand, p1_hand_5, community, p0_disc, p1_disc, n)
+            key = self._make_key(state, cp, p1_hand, p1_hand_5, community, p0_disc, p1_disc, ctx_key)
 
         node = self._get_node(key, actions)
         reach = reach_0 if cp == 0 else reach_1

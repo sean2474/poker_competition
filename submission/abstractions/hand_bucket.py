@@ -254,12 +254,36 @@ def turn_hand_bucket(hand_2: list, board_4: list, dead: list = None) -> int:
     return made * 6 + draw_c * 2 + vuln
 
 
+def _river_made_tier(hand_2: list, board_5: list) -> int:
+    """
+    Fine-grained river made tier (5 levels).
+    0=air/bluff candidate, 1=bluff catcher (weak pair),
+    2=thin value (decent pair), 3=clear value (two pair/trips),
+    4=nutted (straight+)
+    """
+    ev = get_evaluator()
+    h = [int_to_treys(c) for c in hand_2]
+    b = [int_to_treys(c) for c in board_5]
+    rank = ev.evaluate(h, b)
+    if rank <= 1609:
+        return 4  # straight or better = nutted
+    if rank <= 2467:
+        return 3  # trips = clear value
+    if rank <= 3325:
+        return 3  # two pair = clear value
+    if rank <= 4500:
+        return 2  # decent pair = thin value
+    if rank <= 6185:
+        return 1  # weak pair = bluff catcher
+    return 0  # high card = air
+
+
 def river_hand_bucket(hand_2: list, board_5: list, dead: list = None) -> int:
     """
     River hand bucket (5 board cards, no more draws).
-    made(4) × blocker(2) = 8 buckets.
+    made(5) × blocker(2) = 10 buckets.
     """
-    made = _made_tier_from_structure(hand_2, board_5)
+    made = _river_made_tier(hand_2, board_5)
     blocker = _blocker_tier(hand_2, board_5)
     return made * 2 + blocker
 

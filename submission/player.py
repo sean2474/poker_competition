@@ -9,7 +9,7 @@ from submission.abstractions.discard_oracle import choose_discard
 from submission.abstractions.infoset import build_infoset_key
 from submission.abstractions.action_abs import (
     get_valid_abstract_actions, abstract_to_concrete,
-    concrete_to_abstract, action_to_short,
+    concrete_to_abstract, action_to_short, get_action_context,
 )
 from submission.abstractions.hand_bucket import _made_tier_from_structure, _draw_tier
 
@@ -104,14 +104,16 @@ class PlayerAgent(Agent):
         n = len(valid_abs)
 
         # Build infoset key
+        action_ctx = get_action_context(valid, my_bet, opp_bet, max_raise)
+        ctx_key = (action_ctx, n)
         key = build_infoset_key(
             observation, hand_for_key, is_bb,
             self.hero_last_raiser, self.villain_last_raiser,
             self.street_history,
             self.my_discards, self.opp_discards,
         )
-        # Append num_actions to match trainer key format
-        key = key + (n,)
+        # Append (action_ctx, num_actions) to disambiguate decision contexts
+        key = key + (ctx_key,)
 
         if key not in self.strategy_data['strategies']:
             return None
