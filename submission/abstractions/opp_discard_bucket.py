@@ -15,7 +15,7 @@ Features:
 Target: 8-16 buckets.
 """
 
-from submission.abstractions.card_utils import (
+from abstractions.card_utils import (
     card_rank, card_suit, rank_counts, suit_counts,
     has_ace as _has_ace, ACE_RANK_IDX, sorted_ranks,
 )

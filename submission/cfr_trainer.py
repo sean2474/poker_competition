@@ -18,14 +18,14 @@ import os
 import sys
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from submission.abstractions.card_utils import (
+from abstractions.card_utils import (
     DECK_SIZE, get_evaluator, int_to_treys,
 )
-from submission.abstractions.action_abs import action_to_short
-from submission.abstractions.discard_oracle import choose_discard
-from submission.abstractions.infoset import preflop_infoset, postdiscard_infoset
+from abstractions.action_abs import action_to_short
+from abstractions.discard_oracle import choose_discard
+from abstractions.infoset import preflop_infoset, postdiscard_infoset
 
 MAX_BET = 100
 SMALL_BLIND = 1
@@ -321,6 +321,7 @@ class CFRTrainer:
         print(f"Done: {self.iterations} iters, {len(self.nodes)} nodes")
 
     def save(self, path: str):
+        """Save play-only strategy (average strategy + actions). Used by PlayerAgent."""
         data = {}
         for key, node in self.nodes.items():
             data[key] = {
@@ -332,9 +333,40 @@ class CFRTrainer:
         with open(path, 'wb') as f:
             pickle.dump(payload, f)
         sz = os.path.getsize(path) / (1024 * 1024)
-        print(f"Saved to {path} ({sz:.2f} MB, {len(data)} nodes)")
+        print(f"Saved strategy to {path} ({sz:.2f} MB, {len(data)} nodes)")
+
+    def save_checkpoint(self, path: str):
+        """Save full training state (regret_sum + strategy_sum) for resuming."""
+        data = {}
+        for key, node in self.nodes.items():
+            data[key] = {
+                'regret_sum': node.regret_sum.tolist(),
+                'strategy_sum': node.strategy_sum.tolist(),
+                'actions': node.actions,
+            }
+        payload = {'nodes': data, 'iterations': self.iterations}
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump(payload, f)
+        sz = os.path.getsize(path) / (1024 * 1024)
+        print(f"Saved checkpoint to {path} ({sz:.2f} MB, {len(data)} nodes, {self.iterations} iters)")
+
+    def load_checkpoint(self, path: str):
+        """Load training state from checkpoint to resume training."""
+        with open(path, 'rb') as f:
+            payload = pickle.load(f)
+        self.iterations = payload['iterations']
+        self.nodes = {}
+        for key, nd in payload['nodes'].items():
+            actions = nd['actions']
+            node = CFRNode(len(actions), actions)
+            node.regret_sum = np.array(nd['regret_sum'], dtype=np.float64)
+            node.strategy_sum = np.array(nd['strategy_sum'], dtype=np.float64)
+            self.nodes[key] = node
+        print(f"Loaded checkpoint: {self.iterations} iters, {len(self.nodes)} nodes")
 
     @staticmethod
     def load(path: str) -> dict:
+        """Load play-only strategy (used by PlayerAgent)."""
         with open(path, 'rb') as f:
             return pickle.load(f)

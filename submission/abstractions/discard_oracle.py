@@ -15,7 +15,7 @@ Scoring considers:
 """
 
 import random
-from submission.abstractions.card_utils import (
+from abstractions.card_utils import (
     card_rank, card_suit, rank_counts, suit_counts,
     has_ace, has_straight_potential, straight_draw_outs,
     KEEP_PAIRS, NUM_RANKS, ACE_RANK_IDX, DECK_SIZE, ALL_CARDS,

@@ -9,7 +9,7 @@ Turn:  4-card texture(~30) × delta(3) = ~90
 River: 5-card texture(~40) × delta(3) = ~120
 """
 
-from submission.abstractions.card_utils import (
+from abstractions.card_utils import (
     card_rank, card_suit, has_ace, rank_counts, suit_counts,
     sorted_ranks, NUM_RANKS, ACE_RANK_IDX, has_straight_potential,
 )

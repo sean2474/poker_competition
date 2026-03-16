@@ -1,17 +1,21 @@
 import os
+import sys
 import pickle
 import random
+
+# Ensure abstractions/ is importable from both project root and submission/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agents.agent import Agent
 from gym_env import PokerEnv
 
-from submission.abstractions.discard_oracle import choose_discard
-from submission.abstractions.infoset import build_infoset_key
-from submission.abstractions.action_abs import (
+from abstractions.discard_oracle import choose_discard
+from abstractions.infoset import build_infoset_key
+from abstractions.action_abs import (
     get_valid_abstract_actions, abstract_to_concrete,
     concrete_to_abstract, action_to_short, get_action_context,
 )
-from submission.abstractions.hand_bucket import _made_tier_from_structure, _draw_tier
+from abstractions.hand_bucket import _made_tier_from_structure, _draw_tier
 
 
 STRATEGY_PATH = os.path.join(os.path.dirname(__file__), "data", "strategy.pkl")
@@ -165,7 +169,7 @@ class PlayerAgent(Agent):
 
         # ─── Preflop (no community cards): use raw card features ───
         if not community or street == 0:
-            from submission.abstractions.card_utils import card_rank, card_suit, ACE_RANK_IDX
+            from abstractions.card_utils import card_rank, card_suit, ACE_RANK_IDX
             ranks = sorted([card_rank(c) for c in my_cards], reverse=True)
             has_pocket_pair = len(set(ranks)) < len(ranks)
             has_ace = ACE_RANK_IDX in ranks

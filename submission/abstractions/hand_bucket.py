@@ -11,7 +11,7 @@ Axes per street:
 Flop: ~24 buckets  |  Turn: ~24 buckets  |  River: ~12 buckets
 """
 
-from submission.abstractions.card_utils import (
+from abstractions.card_utils import (
     card_rank, card_suit, rank_counts, suit_counts,
     has_ace, has_straight_potential, straight_draw_outs,
     NUM_RANKS, ACE_RANK_IDX,

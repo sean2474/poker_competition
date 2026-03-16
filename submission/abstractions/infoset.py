@@ -11,14 +11,14 @@ River:    (R, position, init, line, pressure, board_bkt, opp_disc_bkt, hand_bkt)
 Keys are tuples (hashable, pickle-safe).
 """
 
-from submission.abstractions.card_utils import canonical_5card_id
-from submission.abstractions.board_texture import board_bucket_for_street
-from submission.abstractions.hand_bucket import hand_bucket_for_street
-from submission.abstractions.opp_discard_bucket import opp_discard_bucket
-from submission.abstractions.public_state import (
+from abstractions.card_utils import canonical_5card_id
+from abstractions.board_texture import board_bucket_for_street
+from abstractions.hand_bucket import hand_bucket_for_street
+from abstractions.opp_discard_bucket import opp_discard_bucket
+from abstractions.public_state import (
     position_bucket, initiative_bucket_simple, line_bucket, pressure_bucket,
 )
-from submission.abstractions.action_abs import action_to_short
+from abstractions.action_abs import action_to_short
 
 
 # ═══════════════════════════════════════════════════════════════════
