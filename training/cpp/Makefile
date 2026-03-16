@@ -10,7 +10,7 @@ test_abstractions: test_abstractions.cpp abstractions.h card_utils.h
 	$(CXX) $(CXXFLAGS) -o test_abstractions test_abstractions.cpp
 
 train_cfr: main.cpp cfr_engine.h abstractions.h card_utils.h
-	$(CXX) $(CXXFLAGS) -O3 -o train_cfr main.cpp
+	$(CXX) $(CXXFLAGS) -O3 -o train_cfr main.cpp -lpthread
 
 clean:
 	rm -f test_cards test_abstractions train_cfr
