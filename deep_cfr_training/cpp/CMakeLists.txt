@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 project(deep_cfr)
 
+# Fix for newer CUDA architectures not known to older libtorch
+# RTX 5090 = compute 12.0, but libtorch 2.2 doesn't know it
+# Use 8.9 (Ada) as compatible fallback, or set to native
+set(TORCH_CUDA_ARCH_LIST "8.9")
+set(ENV{TORCH_CUDA_ARCH_LIST} "8.9")
+
 find_package(Torch REQUIRED)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
