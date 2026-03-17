@@ -109,11 +109,12 @@ class GameState:
 
         if s.street == 0:
             # Preflop tiered sizing
+            _OPEN_AMT = int(round(1.5 * BIG_BLIND))  # open to 2.5bb (raise_amt=3 → bets=5)
             if mn <= BIG_BLIND:                  # open
-                raise_amt = max(mn, min(3 * BIG_BLIND, max_raise))   # 6
-            elif mn <= 3 * BIG_BLIND:            # 3-bet
-                raise_amt = max(mn, min(3 * mn, max_raise))          # 18
-            else:                                # 4-bet+: raise to MAX_BET (50BB per-hand cap)
+                raise_amt = max(mn, min(_OPEN_AMT, max_raise))
+            elif mn <= _OPEN_AMT:                # 3-bet
+                raise_amt = max(mn, min(3 * mn, max_raise))
+            else:                                # 4-bet+: all-in (MAX_BET cap)
                 raise_amt = max_raise
             raise_amt = min(raise_amt, max_raise)   # allow incomplete raise (all-in)
         else:

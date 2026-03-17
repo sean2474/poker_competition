@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from game import GameState, state_to_features, evaluate_showdown, batch_deal_discard
-from game.constants import NUM_ACTIONS
+from game.constants import NUM_ACTIONS, BIG_BLIND
 from preflop_cfr.canonical import canonicalize
 from preflop_cfr.equity   import warmup_ev
 
@@ -74,11 +74,27 @@ def _tabular_strategy(regrets: np.ndarray, valid_actions: list) -> dict:
     return strategy
 
 
+_SZ_THRESHOLDS = [
+    (2.6, 's'),   # ≤2.6bb: small open / limp (our 2.5bb open falls here)
+    (3.2, 'm'),   # 2.6–3.2bb: medium (3bb open)
+    (4.1, 'l'),   # 3.2–4.1bb: large (3.5–4bb open)
+]                 # >4.1bb → 'L'
+
+
+def _size_bucket(state) -> str:
+    """Bucket max(bets) by BB multiples to handle opponent off-size opens."""
+    bb_mult = max(state.bets) / BIG_BLIND
+    for thresh, label in _SZ_THRESHOLDS:
+        if bb_mult <= thresh:
+            return label
+    return 'L'
+
+
 def _preflop_key(hand5, state) -> tuple:
-    """Tabular infoset key: (canonical_hand, history_string)."""
+    """Tabular infoset key: (canonical_hand, size_bucket, history_string)."""
     canon = canonicalize(hand5)
     hist  = ''.join(_ACTION_CHAR.get(a, '?') for _, a in state.history)
-    return (canon, hist)
+    return (canon, _size_bucket(state), hist)
 
 
 _ACTION_CHAR = {0: 'f', 1: 'c', 2: 'k', 3: 'b', 4: 'B', 5: 'r', 6: 'R', 7: 'p'}
