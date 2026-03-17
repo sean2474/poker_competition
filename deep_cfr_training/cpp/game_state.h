@@ -65,8 +65,14 @@ struct GameState {
             actions[n++] = A_CHECK;
             if (can_raise) {
                 actions[n++] = A_BET_SMALL;
+                // Only add BET_POT if meaningfully different from BET_LARGE
+                int spread = max_raise - min_raise;
+                int large_amt = min_raise + spread * 7 / 10;
+                int pot = bets[0] + bets[1];
+                int pot_amt = std::max(min_raise, std::min(pot, (int)max_raise));
+                if (std::abs(pot_amt - large_amt) > 2)
+                    actions[n++] = A_BET_POT;
                 actions[n++] = A_BET_LARGE;
-                actions[n++] = A_BET_POT;
             }
         }
     }

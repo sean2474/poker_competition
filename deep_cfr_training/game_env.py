@@ -188,8 +188,14 @@ class GameState:
             actions.append(A_CHECK)
             if can_raise:
                 actions.append(A_BET_SMALL)
+                # Only add BET_POT if it's meaningfully different from BET_LARGE
+                spread = max_raise - self.min_raise
+                large_amt = self.min_raise + int(spread * 0.70)
+                pot = self.bets[0] + self.bets[1]
+                pot_amt = max(self.min_raise, min(pot, max_raise))
+                if abs(pot_amt - large_amt) > 2:
+                    actions.append(A_BET_POT)
                 actions.append(A_BET_LARGE)
-                actions.append(A_BET_POT)
         return actions
     
     def apply(self, action):
