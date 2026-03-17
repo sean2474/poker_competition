@@ -43,6 +43,7 @@ struct GameState {
     int folded_player = -1;
     int min_raise = BIG_BLIND;
     int num_actions_this_street = 0;
+    int street_bets[4][2] = {};  // [street][player] bet/raise count
 
     void get_valid_actions(int* actions, int& n) const {
         n = 0;
@@ -73,6 +74,7 @@ struct GameState {
         int cp = s.current_player;
         int opp = 1 - cp;
         int max_raise = MAX_BET - std::max(s.bets[0], s.bets[1]);
+        int st = s.street;
 
         if (action == A_FOLD) {
             s.is_terminal = true;
@@ -103,6 +105,7 @@ struct GameState {
 
         // Raise/bet
         s.num_actions_this_street++;
+        if (st < 4) s.street_bets[st][cp]++;
         int spread = max_raise - s.min_raise;
         int raise_amt;
         if (action == A_BET_SMALL || action == A_RAISE_SMALL) {
@@ -267,14 +270,15 @@ inline void opp_range_features(const int* opp_disc, const int* community, int n_
     out[5] = 1.0f - avg;
 }
 
-// Build full 85-dim feature vector
+// Build full 93-dim feature vector (85 + 8 betting history)
 inline void state_to_features(
     const int* hero_hand2, const int* hero_hand5,
     const int* community, int n_comm,
     int my_bet, int opp_bet, int street, bool is_bb,
     const int* my_disc, const int* opp_disc,
     bool use_hand5,
-    float* features
+    float* features,
+    const int street_bets[4][2] = nullptr  // [street][player] bet count
 ) {
     int idx = 0;
 
@@ -360,6 +364,15 @@ inline void state_to_features(
         for (int i = 0; i < 6; i++) features[idx+i] = 0.5f;
     }
     idx += 6;
+
+    // Betting history (8): per-street bet count for hero + opp
+    // Normalized by max reasonable bets per street (3)
+    for (int s = 0; s < 4; s++) {
+        float my_bets = street_bets ? (float)street_bets[s][is_bb ? 1 : 0] / 3.0f : 0.0f;
+        float op_bets = street_bets ? (float)street_bets[s][is_bb ? 0 : 1] / 3.0f : 0.0f;
+        features[idx++] = std::min(my_bets, 1.0f);
+        features[idx++] = std::min(op_bets, 1.0f);
+    }
 
     // Opp range (6)
     int opp_d[3] = {-1, -1, -1};

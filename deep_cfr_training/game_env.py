@@ -22,7 +22,7 @@ A_BET_LARGE = 4
 A_RAISE_SMALL = 5
 A_RAISE_LARGE = 6
 NUM_ACTIONS = 7
-FEATURE_DIM = 85
+FEATURE_DIM = 93  # 85 + 8 betting history
 
 
 # ─── C++ Library (required) ───
@@ -46,7 +46,8 @@ _c_lib.c_state_features.argtypes = [
     ctypes.POINTER(ctypes.c_int), ctypes.c_int,
     ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
-    ctypes.c_int, ctypes.POINTER(ctypes.c_float)
+    ctypes.c_int, ctypes.POINTER(ctypes.c_float),
+    ctypes.POINTER(ctypes.c_int)  # street_bets_flat (8 ints) or null
 ]
 _c_lib.c_evaluate_showdown.argtypes = [
     ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)
@@ -68,7 +69,8 @@ HAS_CPP = True
 # ─── C++ wrapped functions ───
 
 def state_to_features(hero_hand, community, my_bet, opp_bet, street, is_bb,
-                       my_discards=None, opp_discards=None, pot=None, hero_hand5=None):
+                       my_discards=None, opp_discards=None, pot=None, hero_hand5=None,
+                       street_bets=None):
     h2 = (ctypes.c_int * 2)(*(list(hero_hand)[:2] + [-1, -1])[:2])
     h5 = (ctypes.c_int * 5)(*(list(hero_hand5) if hero_hand5 else [-1]*5)[:5])
     comm = (ctypes.c_int * 5)(*([c for c in (community or [])] + [-1]*5)[:5])
@@ -77,8 +79,14 @@ def state_to_features(hero_hand, community, my_bet, opp_bet, street, is_bb,
     od = (ctypes.c_int * 3)(*([c for c in (opp_discards or [])] + [-1]*3)[:3])
     feat = (ctypes.c_float * FEATURE_DIM)()
     use5 = 1 if (hero_hand5 is not None and street == 0) else 0
-    _c_lib.c_state_features(h2, h5, comm, n_comm, int(my_bet), int(opp_bet),
-                             street, 1 if is_bb else 0, md, od, use5, feat)
+    # street_bets: [[p0,p1],[p0,p1],[p0,p1],[p0,p1]] or None
+    if street_bets is not None:
+        sb_flat = (ctypes.c_int * 8)(*[street_bets[s][p] for s in range(4) for p in range(2)])
+        _c_lib.c_state_features(h2, h5, comm, n_comm, int(my_bet), int(opp_bet),
+                                 street, 1 if is_bb else 0, md, od, use5, feat, sb_flat)
+    else:
+        _c_lib.c_state_features(h2, h5, comm, n_comm, int(my_bet), int(opp_bet),
+                                 street, 1 if is_bb else 0, md, od, use5, feat, None)
     return np.array(feat, dtype=np.float32)
 
 
@@ -145,6 +153,7 @@ class GameState:
         self.history = []
         self.last_street_bet = 0
         self.num_actions_this_street = 0
+        self.street_bets = [[0, 0], [0, 0], [0, 0], [0, 0]]  # [street][player]
     
     def copy(self):
         s = GameState()
@@ -157,6 +166,7 @@ class GameState:
         s.history = list(self.history)
         s.last_street_bet = self.last_street_bet
         s.num_actions_this_street = self.num_actions_this_street
+        s.street_bets = [list(b) for b in self.street_bets]
         return s
     
     def get_valid_actions(self):
@@ -214,6 +224,7 @@ class GameState:
         
         # Raise/bet
         s.num_actions_this_street += 1
+        s.street_bets[s.street][cp] += 1
         spread = max_raise - s.min_raise
         if action in (A_BET_SMALL, A_RAISE_SMALL):
             raise_amt = s.min_raise + int(spread * 0.25)
@@ -236,3 +247,4 @@ class GameState:
             self.last_street_bet = max(self.bets)
             self.min_raise = BIG_BLIND
             self.num_actions_this_street = 0
+            # Note: street_bets carry over (history preserved)

@@ -231,7 +231,8 @@ class DeepCFR:
         features = state_to_features(
             hand, vis_comm, state.bets[cp], state.bets[1 - cp],
             state.street, is_bb, my_disc, opp_disc,
-            hero_hand5=hand5 if state.street == 0 else None
+            hero_hand5=hand5 if state.street == 0 else None,
+            street_bets=state.street_bets
         )
 
         # Yield for batch inference — receive strategy back
@@ -336,11 +337,11 @@ class DeepCFR:
                 if not p_idxs:
                     continue
 
-                # Batch forward on GPU
+                # Batch forward on CPU (adv_nets are on CPU during traversal)
                 feats = np.stack([pending[i][0] for i in p_idxs])
-                x = torch.tensor(feats, dtype=torch.float32, device=DEVICE)
+                x = torch.tensor(feats, dtype=torch.float32)  # CPU
                 with torch.no_grad():
-                    adv_batch = self.adv_nets[p](x).cpu().numpy()
+                    adv_batch = self.adv_nets[p](x).numpy()
 
                 # Resume each generator
                 for j, i in enumerate(p_idxs):

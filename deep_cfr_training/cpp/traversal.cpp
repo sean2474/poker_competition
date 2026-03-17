@@ -185,11 +185,20 @@ void c_state_features(
     int my_bet, int opp_bet, int street, int is_bb,
     const int* my_disc, const int* opp_disc,
     int use_hand5,
-    float* features_out
+    float* features_out,
+    const int* street_bets_flat  // 8 ints: [s0p0, s0p1, s1p0, s1p1, ...] or null
 ) {
+    int sb[4][2] = {};
+    if (street_bets_flat) {
+        for (int s = 0; s < 4; s++) {
+            sb[s][0] = street_bets_flat[s*2];
+            sb[s][1] = street_bets_flat[s*2+1];
+        }
+    }
     state_to_features(hero_hand2, hero_hand5, community, n_comm,
                        my_bet, opp_bet, street, (bool)is_bb,
-                       my_disc, opp_disc, (bool)use_hand5, features_out);
+                       my_disc, opp_disc, (bool)use_hand5, features_out,
+                       street_bets_flat ? sb : nullptr);
 }
 
 // Evaluate showdown: returns +1 p0 wins, -1 p1 wins, 0 tie
@@ -201,12 +210,14 @@ int c_evaluate_showdown(const int* p0_hand, const int* p1_hand, const int* commu
 struct CGameState {
     int street, bets0, bets1, current_player, is_terminal, folded_player;
     int min_raise, num_actions;
+    int street_bets[8];  // [s0p0, s0p1, s1p0, s1p1, s2p0, s2p1, s3p0, s3p1]
 };
 
 void c_init_state(CGameState* s) {
     s->street = 0; s->bets0 = SMALL_BLIND; s->bets1 = BIG_BLIND;
     s->current_player = 0; s->is_terminal = 0; s->folded_player = -1;
     s->min_raise = BIG_BLIND; s->num_actions = 0;
+    for (int i = 0; i < 8; i++) s->street_bets[i] = 0;
 }
 
 void c_get_valid_actions(const CGameState* s, int* actions, int* n) {
