@@ -11,9 +11,13 @@ _AGGRESSIVE = {3, 4, 5, 6, 7}  # BET_SMALL, BET_LARGE, RAISE_SMALL, RAISE_LARGE,
 
 
 def _extra_features(history, community, my_bet, opp_bet,
-                    num_actions_this_street, hero_player) -> np.ndarray:
-    """18 additional Python-computed features appended after C++ base (93)."""
-    feat = np.zeros(18, dtype=np.float32)
+                    num_actions_this_street, hero_player,
+                    street_bet_counts=None) -> np.ndarray:
+    """26 additional Python-computed features appended after C++ base (93).
+    [0-17]  initiative, action context, line class, board texture, bet ratios
+    [18-25] bet counts per player per street (re-raise tracking)
+    """
+    feat = np.zeros(26, dtype=np.float32)
 
     # [0-1] Initiative: last aggressor
     for p, a in reversed(history):
@@ -61,6 +65,13 @@ def _extra_features(history, community, my_bet, opp_bet,
     feat[15] = min(my_bet   / sp, 4.0)   # my_bet / pot
     feat[16] = min(max_r    / sp, 4.0)   # max_raise / pot
     feat[17] = max_r / 100.0             # remaining raise room
+
+    # [18-25] Bet counts per player per street (normalized to /4; >4 is capped)
+    # Layout: [hero_pf, opp_pf, hero_flop, opp_flop, hero_turn, opp_turn, hero_river, opp_river]
+    if street_bet_counts is not None:
+        for s in range(4):
+            feat[18 + s*2]     = min(street_bet_counts[s][hero_player]  / 4.0, 1.0)
+            feat[18 + s*2 + 1] = min(street_bet_counts[s][1-hero_player] / 4.0, 1.0)
 
     return feat
 
@@ -111,10 +122,14 @@ print(f"[game] C++ loaded: {_p}")
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
+_BET_HIST_START = 79   # C++ betting history dims start here (8 dims)
+
+
 def state_to_features(hero_hand, community, my_bet, opp_bet, street, is_bb,
                       my_discards=None, opp_discards=None,
                       hero_hand5=None, street_bets=None,
-                      history=None, num_actions_this_street=0) -> np.ndarray:
+                      history=None, num_actions_this_street=0,
+                      street_last_ratios=None, street_bet_counts=None) -> np.ndarray:
     h2   = (ctypes.c_int * 2)(*(list(hero_hand)[:2] + [-1, -1])[:2])
     h5   = (ctypes.c_int * 5)(*(list(hero_hand5) if hero_hand5 else [-1] * 5)[:5])
     comm = (ctypes.c_int * 5)(*([c for c in (community or [])] + [-1] * 5)[:5])
@@ -132,10 +147,19 @@ def state_to_features(hero_hand, community, my_bet, opp_bet, street, is_bb,
         _c_lib.c_state_features(h2, h5, comm, n_c, int(my_bet), int(opp_bet),
                                  street, 1 if is_bb else 0, md, od, use5, feat, None)
     base = np.array(feat, dtype=np.float32)
+
+    # Override C++ betting history (dims 79-86) with last-bet pot-relative ratios
+    if street_last_ratios is not None:
+        hero_player = 1 if is_bb else 0
+        for s in range(4):
+            base[_BET_HIST_START + s*2]     = min(float(street_last_ratios[s][hero_player]),     4.0)
+            base[_BET_HIST_START + s*2 + 1] = min(float(street_last_ratios[s][1-hero_player]), 4.0)
+
     hero_player = 1 if is_bb else 0
     extra = _extra_features(
         history or [], community or [], my_bet, opp_bet,
-        num_actions_this_street, hero_player
+        num_actions_this_street, hero_player,
+        street_bet_counts=street_bet_counts,
     )
     return np.concatenate([base, extra])
 

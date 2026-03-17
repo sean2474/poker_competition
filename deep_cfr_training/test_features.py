@@ -34,7 +34,8 @@ def check(name, cond, detail=""):
 
 
 def feat(hero_hand, community, my_bet, opp_bet, street=2, is_bb=False,
-         my_disc=None, opp_disc=None, history=None, n_acts=0):
+         my_disc=None, opp_disc=None, history=None, n_acts=0,
+         last_ratios=None, bet_counts=None):
     return state_to_features(
         hero_hand, community, my_bet, opp_bet, street, is_bb,
         my_discards=my_disc or [-1,-1,-1],
@@ -42,6 +43,8 @@ def feat(hero_hand, community, my_bet, opp_bet, street=2, is_bb=False,
         street_bets=[[0,0],[0,0],[0,0],[0,0]],
         history=history or [],
         num_actions_this_street=n_acts,
+        street_last_ratios=last_ratios or [[0.0,0.0]]*4,
+        street_bet_counts=bet_counts or [[0,0]]*4,
     )
 
 # Shortcuts: extra feature slice starts at CPP_FEATURE_DIM
@@ -54,7 +57,7 @@ print("=" * 55)
 f0 = feat([c(5), c(6)], [c(0), c(1), c(2)], 10, 20)
 check("total dim == 111",  len(f0) == FEATURE_DIM, f"got {len(f0)}")
 check("C++ base nonzero",  np.any(f0[:CPP_FEATURE_DIM] != 0))
-check("extra slice len=18", len(ex(f0)) == 18)
+check("extra slice len=26", len(ex(f0)) == 26)
 
 
 print()
@@ -184,6 +187,31 @@ check("remaining/100 = 40/100 = 0.4", abs(e[17] - 0.4)  < 0.01, f"got {e[17]:.3f
 # pot=0 edge case → no div-by-zero
 f_zero = feat([c(5),c(6)], [c(0),c(1),c(2)], 0, 0)
 check("no crash when pot=0",   np.all(np.isfinite(ex(f_zero))))
+
+
+print()
+print("=" * 55)
+print("[18-25] Bet counts (re-raise tracking)")
+print("=" * 55)
+# hero (p0, not BB) bet once on flop (s=1), opp bet twice on turn (s=2)
+counts = [[0,0],[1,0],[0,2],[0,0]]
+f = feat([c(5),c(6)], [c(0),c(1),c(2)], 20, 20, is_bb=False, bet_counts=counts)
+e = ex(f)
+check("hero flop count = 1/4 = 0.25",  abs(e[18+1*2]   - 0.25) < 0.01, f"got {e[18+1*2]:.3f}")
+check("opp turn count = 2/4 = 0.5",   abs(e[18+2*2+1] - 0.5)  < 0.01, f"got {e[18+2*2+1]:.3f}")
+check("other counts = 0",             e[18]==0.0 and e[18+1*2+1]==0.0)
+
+# capped at 1.0 for count > 4
+counts_high = [[0,0],[5,0],[0,0],[0,0]]
+f = feat([c(5),c(6)], [c(0),c(1),c(2)], 20, 20, is_bb=False, bet_counts=counts_high)
+e = ex(f)
+check("count capped at 1.0 for >4 bets", e[18+1*2] == 1.0, f"got {e[18+1*2]}")
+
+# BB perspective: hero=p1, so indices flipped
+counts_bb = [[0,0],[0,3],[0,0],[0,0]]  # p1 (hero=BB) bet 3x on flop
+f = feat([c(5),c(6)], [c(0),c(1),c(2)], 20, 20, is_bb=True, bet_counts=counts_bb)
+e = ex(f)
+check("BB hero flop count = 3/4 = 0.75", abs(e[18+1*2] - 0.75) < 0.01, f"got {e[18+1*2]:.3f}")
 
 
 print()

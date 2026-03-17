@@ -18,7 +18,9 @@ class GameState:
         self.history = []
         self.last_street_bet = 0
         self.num_actions_this_street = 0
-        self.street_bets = [[0, 0], [0, 0], [0, 0], [0, 0]]  # [street][player] max raise amt
+        self.street_bets        = [[0, 0], [0, 0], [0, 0], [0, 0]]    # [street][player] max raise amt (chips, for C++)
+        self.street_last_ratios = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]  # LAST bet/pot this street
+        self.street_bet_counts  = [[0, 0], [0, 0], [0, 0], [0, 0]]     # num bets/raises per player per street
 
     def copy(self):
         s = GameState()
@@ -31,7 +33,9 @@ class GameState:
         s.history = list(self.history)
         s.last_street_bet = self.last_street_bet
         s.num_actions_this_street = self.num_actions_this_street
-        s.street_bets = [list(b) for b in self.street_bets]
+        s.street_bets        = [list(b) for b in self.street_bets]
+        s.street_last_ratios = [list(b) for b in self.street_last_ratios]
+        s.street_bet_counts  = [list(b) for b in self.street_bet_counts]
         return s
 
     def get_valid_actions(self):
@@ -122,7 +126,11 @@ class GameState:
                 raise_amt = max(mn, min(int(pot * 0.75), max_raise))
             raise_amt = max(s.min_raise, min(raise_amt, max_raise))
 
-        s.street_bets[s.street][cp] = max(s.street_bets[s.street][cp], raise_amt)
+        pot_before = pot  # pot before the bet/raise
+        ratio = raise_amt / max(float(pot_before), 1.0)
+        s.street_bets[s.street][cp]       = max(s.street_bets[s.street][cp], raise_amt)
+        s.street_last_ratios[s.street][cp] = ratio          # last (not max) — most recent bet size
+        s.street_bet_counts[s.street][cp] += 1               # count re-raises
         s.bets[cp]   = s.bets[opp] + raise_amt
         s.min_raise  = max(raise_amt, s.min_raise)
         s.current_player = opp
