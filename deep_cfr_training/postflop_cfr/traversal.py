@@ -11,14 +11,13 @@ run_traversals_batched: N coroutines simultaneously, batch-inferring only
                         postflop nodes (preflop uses tabular — no network call).
 """
 
-import random
 import numpy as np
 import torch
 
-from game import GameState, state_to_features, evaluate_showdown, batch_deal_discard
-from game.constants import NUM_ACTIONS, BIG_BLIND
+from game import (GameState, evaluate_showdown, batch_deal_discard,
+                  batch_warmup_ev, PostflopBatch)
+from game.constants import NUM_ACTIONS, BIG_BLIND, FEATURE_DIM
 from preflop_cfr.canonical import canonicalize
-from preflop_cfr.equity   import warmup_ev
 
 WARMUP_ITERS       = 50    # hard fallback (if buffer never fills for some reason)
 MIN_WARMUP_SAMPLES = 2000  # per street per player before switching to neural net
@@ -31,24 +30,6 @@ def _postflop_ready(trainer) -> bool:
             if len(trainer.adv_buffers[p].street_bufs[s]) < MIN_WARMUP_SAMPLES:
                 return False
     return True
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _regret_matching(adv_arr, valid_actions: list) -> dict:
-    """Regret matching for postflop neural network output."""
-    total = 0.0
-    best_a, best_v = valid_actions[0], -1e9
-    for a in valid_actions:
-        v = float(adv_arr[a])
-        if v > 0:
-            total += v
-        if v > best_v:
-            best_v, best_a = v, a
-    if total > 0:
-        inv = 1.0 / total
-        return {a: max(float(adv_arr[a]), 0) * inv for a in valid_actions}
-    return {a: (1.0 if a == best_a else 0.0) for a in valid_actions}
 
 
 # Preflop 3-slot abstraction ─────────────────────────────────────────────
@@ -177,90 +158,38 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
 
         return ev
 
-    # ── POSTFLOP: warmup OR neural network ───────────────────────────────
-    # Use equity approximation until buffer is warm enough OR hard iter limit
-    _iter_limit = getattr(trainer, 'warmup_iters', WARMUP_ITERS)
-    if not _postflop_ready(trainer) and getattr(trainer, 'iteration', 1) <= _iter_limit:
-        return warmup_ev(p0_hand5, p1_hand5, state, traversing_player)
-
-    vis_comm = ([], community[:3], community[:4], community[:5])[min(state.street, 3)]
-    features = state_to_features(
-        hand, vis_comm, state.bets[cp], state.bets[1 - cp],
-        state.street, is_bb, my_disc, opp_disc,
-        hero_hand5=None,
-        street_bets=state.street_bets,
-        history=state.history,
-        num_actions_this_street=state.num_actions_this_street,
-        street_last_ratios=state.street_last_ratios,
-        street_bet_counts=state.street_bet_counts,
-    )
-
-    strategy = yield (features, valid_actions, cp, state.street)
-
-    if cp == traversing_player:
-        action_values = {}
-        for a in valid_actions:
-            ns  = state.apply(a)
-            sub = traverse_coro(trainer, ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
-                                 community, p0_disc, p1_disc, traversing_player)
-            try:
-                req = next(sub)
-                while True:
-                    resp = yield req
-                    req  = sub.send(resp)
-            except StopIteration as e:
-                action_values[a] = e.value
-
-        ev         = sum(strategy.get(a, 0) * action_values[a] for a in valid_actions)
-        advantages = np.zeros(NUM_ACTIONS)
-        valid_mask = np.zeros(NUM_ACTIONS)
-        for a in valid_actions:
-            advantages[a] = action_values[a] - ev
-            valid_mask[a] = 1.0
-        trainer.adv_buffers[cp].add(
-            features, advantages, trainer.iteration, valid_mask, street=state.street
-        )
-        return ev
-
-    else:
-        strat_target = np.zeros(NUM_ACTIONS)
-        valid_mask   = np.zeros(NUM_ACTIONS)
-        for a in valid_actions:
-            strat_target[a] = strategy.get(a, 0)
-            valid_mask[a]   = 1.0
-        trainer.strategy_buffer.add(
-            features, strat_target, trainer.iteration, valid_mask, street=state.street
-        )
-        chosen = random.choices(list(strategy.keys()),
-                                weights=list(strategy.values()), k=1)[0]
-        ns  = state.apply(chosen)
-        sub = traverse_coro(trainer, ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
-                             community, p0_disc, p1_disc, traversing_player)
-        try:
-            req = next(sub)
-            while True:
-                resp = yield req
-                req  = sub.send(resp)
-        except StopIteration as e:
-            return e.value
+    # ── POSTFLOP: yield ('CPP_POSTFLOP', ...) → runner handles via C++ ────────
+    # Runner will call C++ batch warmup_ev OR C++ PostflopBatch state machine
+    # and send back the postflop EV as a single float.
+    postflop_ev = yield ('CPP_POSTFLOP',
+                         state, p0_hand, p1_hand,
+                         p0_hand5, p1_hand5, community, p0_disc, p1_disc)
+    return float(postflop_ev)
 
 
 def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player: int):
     """
-    Run N traversals simultaneously.
-    Preflop nodes are handled inline (tabular CFR, no yield).
-    Only postflop nodes appear in pending → batch by player only.
+    C++ traversal: preflop Python tabular CFR → postflop C++ state machine.
+
+    Each coroutine yields ('CPP_POSTFLOP', state, ...) once per postflop
+    entry (one per preflop branch). Sequential rounds process each batch.
+
+    Warmup: c_batch_warmup_ev (C++ OpenMP, no GPU)
+    Neural: C++ PostflopBatch state machine + GPU batch inference
     """
     r = batch_deal_discard(traversals_per_iter)
     p0h, p1h, p0d, p1d, comms, p0h5, p1h5 = r
 
-    gens    = {}
-    pending = {}   # slot → (features, valid_actions, cp, street)
+    is_warmup = (not _postflop_ready(trainer) and
+                 getattr(trainer, 'iteration', 1) <= getattr(trainer, 'warmup_iters', WARMUP_ITERS))
+
+    # Start N coroutines; they run preflop and yield CPP_POSTFLOP at first postflop state
+    gens    = {}   # key → generator
+    pending = {}   # key → (gen, (state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d))
 
     for i in range(traversals_per_iter):
         g = traverse_coro(
-            trainer,
-            GameState(),
+            trainer, GameState(),
             list(p0h[i]),  list(p1h[i]),
             list(p0h5[i]), list(p1h5[i]),
             list(comms[i]), list(p0d[i]), list(p1d[i]),
@@ -268,26 +197,106 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
         )
         gens[i] = g
         try:
-            pending[i] = next(g)
+            req = next(g)
+            if req[0] == 'CPP_POSTFLOP':
+                pending[i] = (g, req[1:])
         except StopIteration:
             del gens[i]
 
-    while pending:
-        # All pending nodes are postflop → batch by player only
+    # Process rounds: each round sends EVs to all pending coroutines,
+    # which advance to the next preflop branch's postflop entry.
+    if is_warmup:
+        while pending:
+            _warmup_round(trainer, gens, pending, traversing_player)
+    else:
+        while pending:
+            _neural_round(trainer, gens, pending, traversing_player)
+
+
+# ── Warmup round (C++ OpenMP equity) ─────────────────────────────────────────
+
+def _warmup_round(trainer, gens, pending, tp):
+    """One round: C++ batch equity for all pending CPP_POSTFLOP requests."""
+    keys = list(pending.keys())
+    n    = len(keys)
+    if n == 0: return
+
+    p0h5_arr = np.zeros((n, 5), dtype=np.int32)
+    p1h5_arr = np.zeros((n, 5), dtype=np.int32)
+    my_bets  = np.zeros(n, dtype=np.int32)
+    opp_bets = np.zeros(n, dtype=np.int32)
+
+    for j, k in enumerate(keys):
+        g, (state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d) = pending[k]
+        p0h5_arr[j] = p0h5[:5]
+        p1h5_arr[j] = p1h5[:5]
+        my_bets[j]  = state.bets[tp]
+        opp_bets[j] = state.bets[1 - tp]
+
+    evs = batch_warmup_ev(p0h5_arr, p1h5_arr, my_bets, opp_bets,
+                          np.full(n, tp, dtype=np.int32))
+
+    pending.clear()
+    for j, k in enumerate(keys):
+        g = gens.get(k)
+        if g is None: continue
+        try:
+            req = g.send(float(evs[j]))
+            if req[0] == 'CPP_POSTFLOP': pending[k] = (g, req[1:])
+        except StopIteration:
+            del gens[k]
+
+
+# ── Neural round (C++ PostflopBatch state machine + GPU) ─────────────────────
+
+def _neural_round(trainer, gens, pending, tp):
+    """One round: C++ PostflopBatch + GPU inference for all pending requests."""
+    keys = list(pending.keys())
+    n    = len(keys)
+    if n == 0: return
+
+    batch = PostflopBatch(n)
+    for j, k in enumerate(keys):
+        g, (state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d) = pending[k]
+        batch.init_one(j, state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d, tp)
+
+    # GPU inference loop (all n games advance together)
+    while batch.n_pending() > 0:
+        cnt, feats, valid, n_valid, players, game_idxs = batch.collect_pending()
+        if cnt == 0: break
+        strategies = np.zeros((cnt, NUM_ACTIONS), dtype=np.float32)
         for p in [0, 1]:
-            idxs = [i for i in list(pending.keys()) if pending[i][2] == p]
-            if not idxs:
-                continue
-
-            feats = np.stack([pending[i][0] for i in idxs])
-            x     = torch.tensor(feats, dtype=torch.float32)
+            pidx = np.where(players[:cnt] == p)[0]
+            if len(pidx) == 0: continue
+            x = torch.tensor(feats[pidx], dtype=torch.float32)
             with torch.no_grad():
-                adv_batch = trainer.adv_nets[p](x).numpy()
+                adv = trainer.adv_nets[p](x).numpy()
+            for k2, gi in enumerate(pidx):
+                strategies[gi] = adv[k2]
+        batch.resume(game_idxs[:cnt].copy(), strategies[:cnt])
 
-            for j, i in enumerate(idxs):
-                _, valid_actions, _, _ = pending.pop(i)
-                strategy = _regret_matching(adv_batch[j], valid_actions)
-                try:
-                    pending[i] = gens[i].send(strategy)
-                except StopIteration:
-                    del gens[i]
+    evs = batch.get_evs()
+
+    # Collect + bulk-add buffer samples
+    (adv_f, adv_v, adv_m, adv_s, adv_p, adv_i,
+     str_f, str_v, str_m, str_s, str_i) = batch.collect_samples(
+         float(trainer.iteration), tp)
+    if len(adv_s) > 0:
+        for p in [0, 1]:
+            pm = adv_p == p
+            if pm.any():
+                trainer.adv_buffers[p].add_batch(
+                    adv_f[pm], adv_v[pm], adv_i[pm], adv_m[pm], adv_s[pm])
+    if len(str_s) > 0:
+        trainer.strategy_buffer.add_batch(str_f, str_v, str_i, str_m, str_s)
+
+    batch.free()
+    pending.clear()
+    for j, k in enumerate(keys):
+        g = gens.get(k)
+        if g is None: continue
+        try:
+            req = g.send(float(evs[j]))
+            if req[0] == 'CPP_POSTFLOP': pending[k] = (g, req[1:])
+        except StopIteration:
+            del gens[k]

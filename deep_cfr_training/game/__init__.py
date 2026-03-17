@@ -8,6 +8,7 @@ from .state import GameState
 from .features import (
     state_to_features, evaluate_showdown,
     fast_discard, batch_deal_discard,
+    batch_warmup_ev, PostflopBatch, serialize_gamestate,
 )
 
 __all__ = [

@@ -31,6 +31,22 @@ class ReservoirBuffer:
             if idx < self._sub_cap:
                 buf[idx] = item
 
+    def add_batch(self, features_arr, values_arr, iterations_arr, masks_arr, streets_arr):
+        """Bulk-add N samples from numpy arrays (fast path for C++ buffer output)."""
+        n = len(streets_arr)
+        for k in range(n):
+            s = max(0, min(int(streets_arr[k]), 3))
+            self.count += 1
+            self.street_counts[s] += 1
+            item = (features_arr[k], values_arr[k], float(iterations_arr[k]), masks_arr[k])
+            buf  = self.street_bufs[s]
+            if len(buf) < self._sub_cap:
+                buf.append(item)
+            else:
+                idx = random.randint(0, self.street_counts[s] - 1)
+                if idx < self._sub_cap:
+                    buf[idx] = item
+
     def sample(self, batch_size: int):
         non_empty = [s for s in range(4) if self.street_bufs[s]]
         if not non_empty:

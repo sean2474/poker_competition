@@ -4,8 +4,6 @@ Deep CFR trainer — composes traversal + training + runner.
 
 import torch
 
-import numpy as np
-
 from models import (
     PostflopAdvantageNet,
     PostflopStrategyNet,
