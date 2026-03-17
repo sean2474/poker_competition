@@ -32,6 +32,19 @@ def run(trainer, num_iterations=500, traversals_per_iter=1000,
     t0     = time.time()
     losses = [0.0, 0.0]
 
+    # ── Graceful Ctrl+C: save checkpoint then exit ──────────────────────────
+    import signal
+    _interrupted = [False]
+
+    def _sigint_handler(sig, frame):
+        if _interrupted[0]:          # second Ctrl+C → force quit
+            raise KeyboardInterrupt
+        _interrupted[0] = True
+        tqdm.write("\n[!] Ctrl+C received — saving checkpoint before exit...")
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+    # ────────────────────────────────────────────────────────────────────────
+
     _bar_fmt = '{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
     pbar  = tqdm(range(start_iter, num_iterations), desc='CFR iters',
                  initial=start_iter, total=num_iterations, position=0, leave=True)
@@ -67,6 +80,12 @@ def run(trainer, num_iterations=500, traversals_per_iter=1000,
             tagged = os.path.join(checkpoint_dir, f'checkpoint_{t+1:04d}.pt')
             save_checkpoint(trainer, tagged, t + 1, save_buffers=False)
             tqdm.write(f'  [ckpt] iter {t+1} → {tagged}')
+
+        if _interrupted[0]:
+            save_checkpoint(trainer, ckpt_path, t + 1, save_buffers=True)
+            tqdm.write(f'  [ckpt] interrupted at iter {t+1} → {ckpt_path}  (buffers saved)')
+            inner.close()
+            return
 
     inner.close()
 
