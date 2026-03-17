@@ -216,43 +216,6 @@ int c_evaluate_showdown(const int* p0_hand, const int* p1_hand, const int* commu
     return evaluate_showdown(p0_hand, p1_hand, community);
 }
 
-// GameState operations
-struct CGameState {
-    int street, bets0, bets1, current_player, is_terminal, folded_player;
-    int min_raise, num_actions;
-    int street_bets[8];  // [s0p0, s0p1, s1p0, s1p1, s2p0, s2p1, s3p0, s3p1]
-};
-
-void c_init_state(CGameState* s) {
-    s->street = 0; s->bets0 = SMALL_BLIND; s->bets1 = BIG_BLIND;
-    s->current_player = 0; s->is_terminal = 0; s->folded_player = -1;
-    s->min_raise = BIG_BLIND; s->num_actions = 0;
-    for (int i = 0; i < 8; i++) s->street_bets[i] = 0;
-}
-
-void c_get_valid_actions(const CGameState* s, int* actions, int* n) {
-    GameState gs;
-    gs.street = s->street; gs.bets[0] = s->bets0; gs.bets[1] = s->bets1;
-    gs.current_player = s->current_player; gs.is_terminal = (bool)s->is_terminal;
-    gs.folded_player = s->folded_player; gs.min_raise = s->min_raise;
-    gs.num_actions_this_street = s->num_actions;
-    gs.get_valid_actions(actions, *n);
-}
-
-void c_apply_action(const CGameState* in, int action, CGameState* out) {
-    GameState gs;
-    gs.street = in->street; gs.bets[0] = in->bets0; gs.bets[1] = in->bets1;
-    gs.current_player = in->current_player; gs.is_terminal = (bool)in->is_terminal;
-    gs.folded_player = in->folded_player; gs.min_raise = in->min_raise;
-    gs.num_actions_this_street = in->num_actions;
-    
-    GameState ns = gs.apply(action);
-    out->street = ns.street; out->bets0 = ns.bets[0]; out->bets1 = ns.bets[1];
-    out->current_player = ns.current_player; out->is_terminal = ns.is_terminal ? 1 : 0;
-    out->folded_player = ns.folded_player; out->min_raise = ns.min_raise;
-    out->num_actions = ns.num_actions_this_street;
-}
-
 // Batch deal + discard: deal N games, discard, return hands
 void c_batch_deal_discard(int n, int* p0_hands, int* p1_hands, int* p0_discs, int* p1_discs,
                            int* communities, int* p0_hand5s, int* p1_hand5s,
