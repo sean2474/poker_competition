@@ -13,9 +13,12 @@ import time
 import numpy as np
 import torch
 
-from game_env import FEATURE_DIM, NUM_ACTIONS, GameState, batch_deal_discard, state_to_features
-from deep_cfr import DeepCFR, DEVICE
-import deep_cfr as dc_mod
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from game import FEATURE_DIM, NUM_ACTIONS, batch_deal_discard, state_to_features
+from cfr import DeepCFR, DEVICE
+import cfr as dc_mod
 
 
 def get_available_devices():
