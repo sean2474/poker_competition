@@ -37,11 +37,10 @@ class AdvantageNet(nn.Module):
     """Predicts per-action advantage values A(s, a)."""
 
     def __init__(self, input_dim: int = FEATURE_DIM,
-                 hidden_dim: int = 512, output_dim: int = NUM_ACTIONS):
+                 hidden_dim: int = 256, output_dim: int = NUM_ACTIONS):
         super().__init__()
         self.embed = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
         self.res   = nn.Sequential(
-            _ResBlock(hidden_dim),
             _ResBlock(hidden_dim),
             _ResBlock(hidden_dim),
         )
@@ -84,11 +83,10 @@ class StrategyNet(nn.Module):
     """
 
     def __init__(self, input_dim: int = FEATURE_DIM,
-                 hidden_dim: int = 512, output_dim: int = NUM_ACTIONS):
+                 hidden_dim: int = 256, output_dim: int = NUM_ACTIONS):
         super().__init__()
         self.embed = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
         self.res   = nn.Sequential(
-            _ResBlock(hidden_dim),
             _ResBlock(hidden_dim),
             _ResBlock(hidden_dim),
         )

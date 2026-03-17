@@ -53,7 +53,7 @@ class _StrategyNet:
     def __init__(self, state_dict: dict):
         import torch
         import torch.nn as nn
-        H = 512
+        H = 256
 
         class _ResBlock(nn.Module):
             def __init__(self, dim):
@@ -68,7 +68,7 @@ class _StrategyNet:
             def __init__(self):
                 super().__init__()
                 self.embed = nn.Sequential(nn.Linear(FEATURE_DIM, H), nn.ReLU())
-                self.res   = nn.Sequential(_ResBlock(H), _ResBlock(H), _ResBlock(H))
+                self.res   = nn.Sequential(_ResBlock(H), _ResBlock(H))
                 self.head  = nn.Linear(H, NUM_ACTIONS)
             def forward(self, x):
                 return self.head(self.res(self.embed(x)))
