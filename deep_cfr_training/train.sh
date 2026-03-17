@@ -8,8 +8,8 @@ set -e
 
 ITERS=${1:-500}
 TRAVERSALS=${2:-1000}
-BATCH_SIZE=${3:-32768}   # optimal: MPS peaks here (1046K/s), CPU plateaus (520K/s)
-TRAIN_BATCHES=${4:-100}  # 32768x100 = 3.3M samples per iter
+BATCH_SIZE=${3:-65536}   # optimal: CUDA 840K/s @ 65536, MPS 1046K/s @ 32768
+TRAIN_BATCHES=${4:-50}   # 65536x50 = 3.3M samples per iter
 
 cd "$(dirname "$0")"
 
