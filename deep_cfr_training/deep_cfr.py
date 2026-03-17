@@ -333,18 +333,16 @@ class DeepCFR:
             return {a: max(float(adv_arr[a]), 0) * inv for a in valid_actions}
         return {a: (1.0 if a == best_a else 0.0) for a in valid_actions}
 
-    def run_traversals_batched(self, traversals_per_iter, traversing_player):
+    def run_traversals_batched(self, traversals_per_iter, traversing_player, pbar=None):
         """
         Run all traversals simultaneously (all-at-once).
         All N generators are active together → maximizes inference batch size.
-        Sliding window is slower: smaller window = smaller inference batch = more overhead.
         """
         from game_env import batch_deal_discard
 
         r = batch_deal_discard(traversals_per_iter)
         p0h, p1h, p0d, p1d, comms, p0h5, p1h5 = r
 
-        # Start all generators
         gens = {}
         pending = {}
         for i in range(traversals_per_iter):
@@ -359,6 +357,7 @@ class DeepCFR:
                 pending[i] = next(g)
             except StopIteration:
                 del gens[i]
+                if pbar: pbar.update(1)
 
         while pending:
             for p in [0, 1]:
@@ -378,6 +377,7 @@ class DeepCFR:
                         pending[i] = gens[i].send(strategy)
                     except StopIteration:
                         del gens[i]
+                        if pbar: pbar.update(1)
 
     @staticmethod
     def _to_device(arr, dtype=torch.float32):
@@ -389,14 +389,13 @@ class DeepCFR:
             return t.pin_memory().to(DEVICE, non_blocking=True)
         return t.to(DEVICE)  # mps: no pin_memory support
 
-    def train_networks(self, batch_size=2048, num_batches=100):
+    def train_networks(self, batch_size=2048, num_batches=100, pbar=None):
         """Train advantage networks FROM SCRATCH each iteration (paper Section 5.2)."""
         losses = [0, 0]
         for p in range(2):
             if len(self.adv_buffers[p]) < batch_size:
                 continue
             
-            # CRITICAL: reinitialize network from scratch each iteration (paper Section 5.2)
             self.adv_nets[p] = AdvantageNet().to(DEVICE)
             opt = optim.Adam(self.adv_nets[p].parameters(), lr=self.lr)
             net = self.adv_nets[p]
@@ -419,6 +418,7 @@ class DeepCFR:
                 loss.backward()
                 opt.step()
                 total_loss += loss.item()
+                if pbar: pbar.update(1)
             
             self.adv_nets[p] = self.adv_nets[p].cpu()
             losses[p] = total_loss / num_batches
@@ -472,38 +472,47 @@ class DeepCFR:
         t0 = time.time()
         losses = [0.0, 0.0]
 
-        pbar = tqdm(range(start_iter, num_iterations), desc='CFR iters',
-                    initial=start_iter, total=num_iterations)
+        _bar_fmt = '{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+        pbar  = tqdm(range(start_iter, num_iterations), desc='CFR iters',
+                     initial=start_iter, total=num_iterations, position=0, leave=True)
+        inner = tqdm(total=1, position=1, leave=False, bar_format=_bar_fmt)
+
         for t in pbar:
             self.iteration = t + 1
 
-            # Batched traversals
+            # Traversals with inner progress
             for traversing in range(2):
-                self.run_traversals_batched(traversals_per_iter, traversing)
+                inner.reset(total=traversals_per_iter)
+                inner.set_description(f'Trav P{traversing}')
+                self.run_traversals_batched(traversals_per_iter, traversing, pbar=inner)
+                inner.refresh()
 
-            # Train networks
+            # Train networks with inner progress
             if (t + 1) % train_interval == 0:
-                losses = self.train_networks(batch_size, num_batches)
+                inner.reset(total=num_batches * 2)
+                inner.set_description('Training ')
+                losses = self.train_networks(batch_size, num_batches, pbar=inner)
+                inner.refresh()
 
-            # tqdm postfix
+            # Outer bar postfix
             elapsed = time.time() - t0
             done = t - start_iter + 1
             ips = done / elapsed if elapsed > 0 else 0
             buf_sizes = [len(b) for b in self.adv_buffers]
-            street_dist = [len(self.adv_buffers[0].street_bufs[s]) for s in range(4)]
             pbar.set_postfix({
-                'it/s':  f'{ips:.1f}',
-                'loss':  f'{losses[0]:.3f}/{losses[1]:.3f}',
-                'buf':   f'{buf_sizes[0]//1000}K/{buf_sizes[1]//1000}K',
-                'st':    '/'.join(str(s//100) for s in street_dist) + 'h',
-            })
+                'it/s': f'{ips:.1f}',
+                'loss': f'{losses[0]:.3f}/{losses[1]:.3f}',
+                'buf':  f'{buf_sizes[0]//1000}K/{buf_sizes[1]//1000}K',
+            }, refresh=False)
 
             # Checkpoint
             if (t + 1) % checkpoint_interval == 0:
                 self.save_checkpoint(ckpt_path, t + 1)
                 tagged = os.path.join(checkpoint_dir, f'checkpoint_{t+1:04d}.pt')
                 self.save_checkpoint(tagged, t + 1)
-                tqdm.write(f"  [ckpt] saved iter {t+1} → {tagged}")
+                tqdm.write(f'  [ckpt] iter {t+1} → {tagged}')
+
+        inner.close()
 
         # Final strategy net training
         tqdm.write("\nTraining average strategy network...")
