@@ -173,17 +173,20 @@ class PlayerAgent(Agent):
     # ── CFR action → game action ──────────────────────────────────────────────
 
     def _to_game(self, cfr_a: int, obs) -> tuple:
-        min_r = int(obs['min_raise']); max_r = int(obs['max_raise'])
+        min_r = int(obs['min_raise'])
+        max_r = int(obs['max_raise'])   # = MAX_PLAYER_BET - max(bets)  (increment)
         pot   = obs['my_bet'] + obs['opp_bet']
-        sp    = max(max_r - min_r, 0)
         if cfr_a == A_FOLD:  return (_FOLD,  0, 0, 0)
         if cfr_a == A_CALL:  return (_CALL,  0, 0, 0)
         if cfr_a == A_CHECK: return (_CHECK, 0, 0, 0)
+        # pot-relative sizing (raise_amount is INCREMENT above opp bet)
         if cfr_a in (A_BET_SMALL, A_RAISE_SMALL):
-            return (_RAISE, max(min_r, min(min_r + int(sp * 0.25), max_r)), 0, 0)
-        if cfr_a == A_BET_POT:
-            return (_RAISE, max(min_r, min(pot, max_r)), 0, 0)
-        return (_RAISE, max(min_r, min(min_r + int(sp * 0.70), max_r)), 0, 0)
+            amt = max(min_r, min(int(pot * 0.33), max_r))
+        elif cfr_a == A_BET_POT:
+            amt = max(min_r, min(pot, max_r))
+        else:  # BET_LARGE / RAISE_LARGE
+            amt = max(min_r, min(int(pot * 0.75), max_r))
+        return (_RAISE, amt, 0, 0)
 
     # ── Preflop decision ──────────────────────────────────────────────────────
 
@@ -330,7 +333,8 @@ class PlayerAgent(Agent):
         is_bb    = observation.get('blind_position', 0) == 1
         opp_pid  = 0 if is_bb else 1
 
-        _map = {'FOLD': A_FOLD, 'CALL': A_CALL, 'CHECK': A_CHECK}
+        _map = {'FOLD': A_FOLD, 'CALL': A_CALL, 'CHECK': A_CHECK,
+                'INVALID': A_FOLD}   # invalid treated as fold by engine
         if opp_last in _map:
             self._history.append((opp_pid, _map[opp_last]))
             self._num_acts += 1
