@@ -176,7 +176,16 @@ agent_logs/
 *.npy
 *.bin.ready
 training/data/
+mccfr_training/data/
 training/cpp/train_cfr
 training/cpp/test_cards
 training/cpp/test_abstractions
 submission/data/
+
+# Deep CFR model files
+deep_cfr_training/model/
+deep_cfr_training/test_weights*.pt
+deep_cfr_training/test_weights*.npz
+deep_cfr_training/cpp/libtraversal.so
+deep_cfr_training/cpp/libtraversal.dylib
+deep_cfr_training/cpp/build/

@@ -208,6 +208,7 @@ public:
     int iteration = 0;
     int total_iterations = 1;
     int num_threads = 1;
+    std::mt19937 rng{std::random_device{}()};
 
     torch::Device device = torch::kCPU;
 
@@ -349,13 +350,11 @@ public:
             }
             strategy_buffer.add(features, strat_target, valid_mask, iteration, rng);
 
-            // Sample action
-            std::discrete_distribution<int> dist(strategy, strategy + NUM_ACTIONS);
-            int chosen = dist(rng);
-            // Make sure chosen is valid
-            bool valid = false;
-            for (int i = 0; i < n_valid; i++) if (valid_actions[i] == chosen) valid = true;
-            if (!valid) chosen = valid_actions[0];
+            // Sample action from valid actions only
+            float valid_probs[NUM_ACTIONS];
+            for (int i = 0; i < n_valid; i++) valid_probs[i] = strategy[valid_actions[i]];
+            std::discrete_distribution<int> dist(valid_probs, valid_probs + n_valid);
+            int chosen = valid_actions[dist(rng)];
 
             GameState ns = state.apply(chosen);
             return traverse(ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
@@ -444,11 +443,10 @@ public:
             }
             strategy_buffer.add(features, strat_target, valid_mask, iteration, thread_rng);
 
-            std::discrete_distribution<int> dist(strategy, strategy + NUM_ACTIONS);
-            int chosen = dist(thread_rng);
-            bool valid = false;
-            for (int i = 0; i < n_valid; i++) if (valid_actions[i] == chosen) valid = true;
-            if (!valid) chosen = valid_actions[0];
+            float valid_probs[NUM_ACTIONS];
+            for (int i = 0; i < n_valid; i++) valid_probs[i] = strategy[valid_actions[i]];
+            std::discrete_distribution<int> dist(valid_probs, valid_probs + n_valid);
+            int chosen = valid_actions[dist(thread_rng)];
 
             GameState ns = state.apply(chosen);
             return traverse_thread_safe(ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
@@ -468,8 +466,7 @@ public:
             for (int b = 0; b < num_batches; b++) {
                 std::vector<int> indices(batch_size);
                 std::uniform_int_distribution<int> dist(0, adv_buffers[p].size() - 1);
-                std::mt19937 sample_rng(b);
-                for (int i = 0; i < batch_size; i++) indices[i] = dist(sample_rng);
+                for (int i = 0; i < batch_size; i++) indices[i] = dist(rng);
 
                 auto x = torch::zeros({batch_size, FEATURE_DIM});
                 auto y = torch::zeros({batch_size, NUM_ACTIONS});
@@ -524,6 +521,8 @@ public:
                 std::memcpy(m.data_ptr<float>() + i * NUM_ACTIONS, s.valid_mask, NUM_ACTIONS * sizeof(float));
                 w[i] = 2.0f * s.iteration / std::max(total_iterations, 1);
             }
+
+            x = x.to(device); y = y.to(device); w = w.to(device); m = m.to(device);
 
             auto logits = strategy_net->forward(x);
             auto log_probs = torch::log_softmax(logits, 1);

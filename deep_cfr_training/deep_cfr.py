@@ -25,17 +25,21 @@ import os
 import sys
 import time
 import random
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from collections import deque
 
 from game_env import (
     GameState, deal_game, fast_discard, evaluate_showdown,
     state_to_features, FEATURE_DIM, NUM_ACTIONS,
 )
 from networks import AdvantageNet, StrategyNet
+
+# GPU device
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Training device: {DEVICE}')
 
 
 class ReservoirBuffer:
@@ -73,17 +77,16 @@ class DeepCFR:
     
     def __init__(self, lr=0.001, buffer_size=2_000_000):
         self.lr = lr
-        self.adv_nets = [AdvantageNet() for _ in range(2)]  # advantage networks (per player)
+        self.adv_nets = [AdvantageNet() for _ in range(2)]  # stay on CPU for traversal
         self.adv_buffers = [ReservoirBuffer(buffer_size) for _ in range(2)]
         self.optimizers = [optim.Adam(net.parameters(), lr=lr) for net in self.adv_nets]
         
-        # Average strategy: single shared network
         self.strategy_net = StrategyNet()
         self.strategy_buffer = ReservoirBuffer(buffer_size)
         self.strategy_optimizer = optim.Adam(self.strategy_net.parameters(), lr=lr)
         
         self.iteration = 0
-        self.total_iterations = 1  # set in run()
+        self.total_iterations = 1
     
     def traverse(self, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
                   community, p0_disc, p1_disc, traversing_player):
@@ -192,6 +195,164 @@ class DeepCFR:
                 community, p0_disc, p1_disc, traversing_player
             )
     
+    # ── Coroutine-based traverse for batch inference ──────────────────
+
+    def traverse_coro(self, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
+                       community, p0_disc, p1_disc, traversing_player):
+        """
+        Generator version of traverse.
+        Yields (features, valid_actions, cp) when network inference is needed.
+        Receives strategy dict via .send(strategy).
+        Returns EV via StopIteration.value.
+        """
+        if state.is_terminal:
+            if state.folded_player >= 0:
+                if state.folded_player == traversing_player:
+                    return -float(state.bets[traversing_player])
+                else:
+                    return float(state.bets[1 - traversing_player])
+            pot = min(state.bets[0], state.bets[1])
+            sd = evaluate_showdown(p0_hand, p1_hand, community)
+            return float(sd * pot if traversing_player == 0 else -sd * pot)
+
+        cp = state.current_player
+        valid_actions = state.get_valid_actions()
+        if not valid_actions:
+            return 0.0
+
+        if cp == 0:
+            hand, hand5, is_bb = p0_hand, p0_hand5, False
+            my_disc, opp_disc = p0_disc, p1_disc
+        else:
+            hand, hand5, is_bb = p1_hand, p1_hand5, True
+            my_disc, opp_disc = p1_disc, p0_disc
+
+        vis_comm = ([], community[:3], community[:4], community[:5])[min(state.street, 3)]
+        features = state_to_features(
+            hand, vis_comm, state.bets[cp], state.bets[1 - cp],
+            state.street, is_bb, my_disc, opp_disc,
+            hero_hand5=hand5 if state.street == 0 else None
+        )
+
+        # Yield for batch inference — receive strategy back
+        strategy = yield (features, valid_actions, cp)
+
+        if cp == traversing_player:
+            action_values = {}
+            for a in valid_actions:
+                ns = state.apply(a)
+                sub = self.traverse_coro(ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
+                                          community, p0_disc, p1_disc, traversing_player)
+                try:
+                    req = next(sub)
+                    while True:
+                        resp = yield req   # pass inference requests up
+                        req = sub.send(resp)
+                except StopIteration as e:
+                    action_values[a] = e.value
+
+            ev = sum(strategy.get(a, 0) * action_values[a] for a in valid_actions)
+            advantages = np.zeros(NUM_ACTIONS)
+            valid_mask = np.zeros(NUM_ACTIONS)
+            for a in valid_actions:
+                advantages[a] = action_values[a] - ev
+                valid_mask[a] = 1.0
+            self.adv_buffers[cp].add(features, advantages, self.iteration, valid_mask)
+            return ev
+
+        else:
+            strat_target = np.zeros(NUM_ACTIONS)
+            valid_mask = np.zeros(NUM_ACTIONS)
+            for a in valid_actions:
+                strat_target[a] = strategy.get(a, 0)
+                valid_mask[a] = 1.0
+            self.strategy_buffer.add(features, strat_target, self.iteration, valid_mask)
+
+            actions = list(strategy.keys())
+            probs = [strategy[a] for a in actions]
+            chosen = random.choices(actions, weights=probs, k=1)[0]
+            ns = state.apply(chosen)
+            sub = self.traverse_coro(ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
+                                      community, p0_disc, p1_disc, traversing_player)
+            try:
+                req = next(sub)
+                while True:
+                    resp = yield req
+                    req = sub.send(resp)
+            except StopIteration as e:
+                return e.value
+
+    @staticmethod
+    def _regret_matching(adv_arr, valid_actions):
+        """Pure Python regret matching on numpy array."""
+        total = 0.0
+        best_a, best_v = valid_actions[0], -1e9
+        for a in valid_actions:
+            v = float(adv_arr[a])
+            if v > 0: total += v
+            if v > best_v: best_v = v; best_a = a
+        if total > 0:
+            inv = 1.0 / total
+            return {a: max(float(adv_arr[a]), 0) * inv for a in valid_actions}
+        return {a: (1.0 if a == best_a else 0.0) for a in valid_actions}
+
+    def run_traversals_batched(self, traversals_per_iter, traversing_player):
+        """
+        Run `traversals_per_iter` traversals simultaneously.
+        At each inference step, batch all waiting generators → single GPU forward.
+        """
+        # Deal all games at once via C++
+        r = __import__('game_env', fromlist=['batch_deal_discard']).batch_deal_discard(traversals_per_iter)
+        p0h, p1h, p0d, p1d, comms, p0h5, p1h5 = r
+
+        # Init generators
+        gens = {}
+        for i in range(traversals_per_iter):
+            p0_hand = list(p0h[i])
+            p1_hand = list(p1h[i])
+            p0_disc = list(p0d[i])
+            p1_disc = list(p1d[i])
+            comm = list(comms[i])
+            p0_5 = list(p0h5[i])
+            p1_5 = list(p1h5[i])
+            g = self.traverse_coro(GameState(), p0_hand, p1_hand, p0_5, p1_5,
+                                    comm, p0_disc, p1_disc, traversing_player)
+            gens[i] = g
+
+        # Bootstrap: start all generators
+        pending = {}  # idx → (features, valid_actions, cp)
+        for i, g in list(gens.items()):
+            try:
+                req = next(g)
+                pending[i] = req
+            except StopIteration:
+                del gens[i]
+
+        # Run until all done
+        while pending:
+            # Process each player's batch
+            for p in [0, 1]:
+                p_idxs = [i for i in list(pending.keys()) if pending[i][2] == p]
+                if not p_idxs:
+                    continue
+
+                # Batch forward on GPU
+                feats = np.stack([pending[i][0] for i in p_idxs])
+                x = torch.tensor(feats, dtype=torch.float32, device=DEVICE)
+                with torch.no_grad():
+                    adv_batch = self.adv_nets[p](x).cpu().numpy()
+
+                # Resume each generator
+                for j, i in enumerate(p_idxs):
+                    _, valid_actions, _ = pending.pop(i)
+                    strategy = self._regret_matching(adv_batch[j], valid_actions)
+                    try:
+                        new_req = gens[i].send(strategy)
+                        pending[i] = new_req
+                    except StopIteration:
+                        if i in gens:
+                            del gens[i]
+
     def train_networks(self, batch_size=2048, num_batches=100):
         """Train advantage networks FROM SCRATCH each iteration (paper Section 5.2)."""
         losses = [0, 0]
@@ -199,28 +360,24 @@ class DeepCFR:
             if len(self.adv_buffers[p]) < batch_size:
                 continue
             
-            # CRITICAL: reinitialize network from scratch each iteration
-            # Paper: "training the model from scratch at each iteration leads to better convergence"
-            self.adv_nets[p] = AdvantageNet()
-            self.optimizers[p] = optim.Adam(self.adv_nets[p].parameters(), lr=self.lr)
+            # CRITICAL: reinitialize network from scratch each iteration (paper Section 5.2)
+            self.adv_nets[p] = AdvantageNet().to(DEVICE)
+            opt = optim.Adam(self.adv_nets[p].parameters(), lr=self.lr)
             
             net = self.adv_nets[p]
-            opt = self.optimizers[p]
             
             total_loss = 0
             for _ in range(num_batches):
                 features, advantages, iterations, masks = self.adv_buffers[p].sample(batch_size)
                 
-                # Linear CFR weighting: 2t/T (paper Section 5.3)
                 weights = 2.0 * iterations / max(self.total_iterations, 1)
                 
-                x = torch.tensor(features, dtype=torch.float32)
-                y = torch.tensor(advantages, dtype=torch.float32)
-                w = torch.tensor(weights, dtype=torch.float32)
-                m = torch.tensor(masks, dtype=torch.float32)
+                x = torch.tensor(features, dtype=torch.float32, device=DEVICE)
+                y = torch.tensor(advantages, dtype=torch.float32, device=DEVICE)
+                w = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
+                m = torch.tensor(masks, dtype=torch.float32, device=DEVICE)
                 
                 pred = net(x)
-                # Weighted MSE loss with proper valid action mask
                 mask_sum = m.sum() + 1e-8
                 loss = ((pred - y) ** 2 * w.unsqueeze(1) * m).sum() / mask_sum
                 
@@ -228,6 +385,9 @@ class DeepCFR:
                 loss.backward()
                 opt.step()
                 total_loss += loss.item()
+            
+            # Move back to CPU for traversal inference
+            self.adv_nets[p] = self.adv_nets[p].cpu()
             
             losses[p] = total_loss / num_batches
         
@@ -245,31 +405,12 @@ class DeepCFR:
         
         t0 = time.time()
         
-        for t in range(num_iterations):
+        for t in tqdm(range(num_iterations), desc='CFR iters'):
             self.iteration = t + 1
             
-            # Traversals
-            for trav_idx in range(traversals_per_iter):
-                # Deal random game
-                p0_5, p1_5, community = deal_game()
-                board3 = community[:3]
-                
-                # Heuristic discard (like MCCFR)
-                ki0, kj0 = fast_discard(p0_5, board3)
-                p0_hand = [p0_5[ki0], p0_5[kj0]]
-                p0_disc = [p0_5[k] for k in range(5) if k != ki0 and k != kj0]
-                
-                ki1, kj1 = fast_discard(p1_5, board3)
-                p1_hand = [p1_5[ki1], p1_5[kj1]]
-                p1_disc = [p1_5[k] for k in range(5) if k != ki1 and k != kj1]
-                
-                # Traverse for both players (balances buffers)
-                for traversing in range(2):
-                    state = GameState()  # street=0, bets=[1,2], cp=0
-                    self.traverse(
-                        state, p0_hand, p1_hand, p0_5, p1_5,
-                        community, p0_disc, p1_disc, traversing
-                    )
+            # Batched traversals: both players in one C++ batch deal
+            for traversing in range(2):
+                self.run_traversals_batched(traversals_per_iter, traversing)
             
             # Train networks periodically
             if (t + 1) % train_interval == 0:
@@ -303,26 +444,22 @@ class DeepCFR:
             print(f"  Strategy buffer too small ({len(self.strategy_buffer)}), skipping")
             return
         
-        net = self.strategy_net
-        opt = self.strategy_optimizer
+        self.strategy_net = self.strategy_net.to(DEVICE)
+        opt = optim.Adam(self.strategy_net.parameters(), lr=self.lr)
         
         total_loss = 0
         for b in range(num_batches):
             features, strategies, iterations, masks = self.strategy_buffer.sample(batch_size)
             
-            # Linear CFR weighting: 2t/T
             weights = 2.0 * iterations / max(self.total_iterations, 1)
             
-            x = torch.tensor(features, dtype=torch.float32)
-            y = torch.tensor(strategies, dtype=torch.float32)
-            w = torch.tensor(weights, dtype=torch.float32)
-            m = torch.tensor(masks, dtype=torch.float32)
+            x = torch.tensor(features, dtype=torch.float32, device=DEVICE)
+            y = torch.tensor(strategies, dtype=torch.float32, device=DEVICE)
+            w = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
+            m = torch.tensor(masks, dtype=torch.float32, device=DEVICE)
             
-            # Strategy net outputs logits → softmax → cross-entropy with target strategy
-            logits = net(x)
+            logits = self.strategy_net(x)
             log_probs = torch.log_softmax(logits, dim=1)
-            
-            # Weighted KL divergence with proper valid action mask
             loss = -(y * log_probs * m * w.unsqueeze(1)).sum() / (m.sum() + 1e-8)
             
             opt.zero_grad()
@@ -333,6 +470,7 @@ class DeepCFR:
             if (b + 1) % 100 == 0:
                 print(f"  Strategy net batch {b+1}/{num_batches}, loss={total_loss/(b+1):.4f}")
         
+        self.strategy_net = self.strategy_net.cpu()
         print(f"  Strategy net trained: avg loss={total_loss/num_batches:.4f}")
     
     def export(self, path):
@@ -363,9 +501,11 @@ def main():
     parser.add_argument("--train-batches", type=int, default=100)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--buffer-size", type=int, default=2_000_000)
-    parser.add_argument("--output", type=str, default="deep_cfr_weights")
+    _default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model', 'deep_cfr')
+    parser.add_argument("--output", type=str, default=_default_out)
     args = parser.parse_args()
     
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
     trainer = DeepCFR(lr=args.lr, buffer_size=args.buffer_size)
     trainer.run(
         num_iterations=args.iterations,
