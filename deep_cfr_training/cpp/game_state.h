@@ -58,23 +58,31 @@ struct GameState {
             actions[n++] = A_FOLD;
             actions[n++] = A_CALL;
             if (can_raise) {
-                actions[n++] = A_RAISE_SMALL;
-                actions[n++] = A_RAISE_LARGE;
+                if (street == 0) {
+                    actions[n++] = A_RAISE_SMALL;  // single preflop raise size
+                } else {
+                    actions[n++] = A_RAISE_SMALL;
+                    actions[n++] = A_RAISE_LARGE;
+                }
             }
         } else {
             actions[n++] = A_CHECK;
             if (can_raise) {
-                int pot = bets[0] + bets[1];
-                // Pot-relative sizing: 33% / 75% / 100% of pot
-                int small_amt = std::max(min_raise, std::min(pot * 33 / 100, max_raise));
-                int large_amt = std::max(min_raise, std::min(pot * 75 / 100, max_raise));
-                int pot_amt   = std::max(min_raise, std::min(pot,             max_raise));
-                int thresh = std::max(2, pot / 20);  // 5% of pot, min 2
-                actions[n++] = A_BET_SMALL;
-                if (std::abs(pot_amt - large_amt) > thresh)
-                    actions[n++] = A_BET_POT;
-                if (std::abs(large_amt - small_amt) > thresh)
-                    actions[n++] = A_BET_LARGE;
+                if (street == 0) {
+                    actions[n++] = A_BET_SMALL;  // single preflop open size
+                } else {
+                    int pot = bets[0] + bets[1];
+                    // Postflop: pot-relative sizing 33% / 75% / 100%
+                    int small_amt = std::max(min_raise, std::min(pot * 33 / 100, max_raise));
+                    int large_amt = std::max(min_raise, std::min(pot * 75 / 100, max_raise));
+                    int pot_amt   = std::max(min_raise, std::min(pot,             max_raise));
+                    int thresh = std::max(2, pot / 20);
+                    actions[n++] = A_BET_SMALL;
+                    if (std::abs(pot_amt - large_amt) > thresh)
+                        actions[n++] = A_BET_POT;
+                    if (std::abs(large_amt - small_amt) > thresh)
+                        actions[n++] = A_BET_LARGE;
+                }
             }
         }
     }
@@ -118,12 +126,20 @@ struct GameState {
         int pot = s.bets[0] + s.bets[1];
         int mn = s.min_raise;
         int raise_amt;
-        if (action == A_BET_SMALL || action == A_RAISE_SMALL) {
-            raise_amt = std::max(mn, std::min(pot * 33 / 100, max_raise));
-        } else if (action == A_BET_POT) {
-            raise_amt = std::max(mn, std::min(pot, max_raise));
-        } else {  // BET_LARGE / RAISE_LARGE
-            raise_amt = std::max(mn, std::min(pot * 75 / 100, max_raise));
+        if (st == 0) {
+            // Preflop: single size — 3xBB for first raise, 3x previous for re-raises
+            if (mn == BIG_BLIND)
+                raise_amt = std::max(mn, std::min(3 * BIG_BLIND, max_raise));  // open: 6
+            else
+                raise_amt = std::max(mn, std::min(3 * mn, max_raise));  // re-raise: 3x prev
+        } else {
+            // Postflop: pot-relative sizing
+            if (action == A_BET_SMALL || action == A_RAISE_SMALL)
+                raise_amt = std::max(mn, std::min(pot * 33 / 100, max_raise));
+            else if (action == A_BET_POT)
+                raise_amt = std::max(mn, std::min(pot, max_raise));
+            else
+                raise_amt = std::max(mn, std::min(pot * 75 / 100, max_raise));
         }
         raise_amt = std::max(s.min_raise, std::min(raise_amt, max_raise));
         if (st < 4) s.street_bets[st][cp] = std::max(s.street_bets[st][cp], raise_amt);

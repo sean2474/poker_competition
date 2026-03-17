@@ -182,23 +182,28 @@ class GameState:
             actions.append(A_FOLD)
             actions.append(A_CALL)
             if can_raise:
-                actions.append(A_RAISE_SMALL)
-                actions.append(A_RAISE_LARGE)
+                if self.street == 0:
+                    actions.append(A_RAISE_SMALL)  # single preflop raise size
+                else:
+                    actions.append(A_RAISE_SMALL)
+                    actions.append(A_RAISE_LARGE)
         else:
             actions.append(A_CHECK)
             if can_raise:
-                pot = self.bets[0] + self.bets[1]
-                mn = self.min_raise
-                # Pot-relative sizing: 33% / 75% / 100% of pot
-                small_amt = max(mn, min(int(pot * 0.33), max_raise))
-                large_amt = max(mn, min(int(pot * 0.75), max_raise))
-                pot_amt   = max(mn, min(pot,             max_raise))
-                thresh = max(2, pot // 20)  # 5% of pot, min 2
-                actions.append(A_BET_SMALL)
-                if abs(pot_amt - large_amt) > thresh:
-                    actions.append(A_BET_POT)
-                if abs(large_amt - small_amt) > thresh:
-                    actions.append(A_BET_LARGE)
+                if self.street == 0:
+                    actions.append(A_BET_SMALL)  # single preflop open size
+                else:
+                    pot = self.bets[0] + self.bets[1]
+                    mn = self.min_raise
+                    small_amt = max(mn, min(int(pot * 0.33), max_raise))
+                    large_amt = max(mn, min(int(pot * 0.75), max_raise))
+                    pot_amt   = max(mn, min(pot, max_raise))
+                    thresh = max(2, pot // 20)
+                    actions.append(A_BET_SMALL)
+                    if abs(pot_amt - large_amt) > thresh:
+                        actions.append(A_BET_POT)
+                    if abs(large_amt - small_amt) > thresh:
+                        actions.append(A_BET_LARGE)
         return actions
     
     def apply(self, action):
@@ -237,12 +242,20 @@ class GameState:
         s.num_actions_this_street += 1
         pot = s.bets[0] + s.bets[1]
         mn = s.min_raise
-        if action in (A_BET_SMALL, A_RAISE_SMALL):
-            raise_amt = max(mn, min(int(pot * 0.33), max_raise))
-        elif action == A_BET_POT:
-            raise_amt = max(mn, min(pot, max_raise))
-        else:  # BET_LARGE / RAISE_LARGE
-            raise_amt = max(mn, min(int(pot * 0.75), max_raise))
+        if s.street == 0:
+            # Preflop: single size — 3xBB for first raise, 3x previous for re-raises
+            if mn == BIG_BLIND:
+                raise_amt = max(mn, min(3 * BIG_BLIND, max_raise))  # open: 6
+            else:
+                raise_amt = max(mn, min(3 * mn, max_raise))  # re-raise: 3x prev
+        else:
+            # Postflop: pot-relative
+            if action in (A_BET_SMALL, A_RAISE_SMALL):
+                raise_amt = max(mn, min(int(pot * 0.33), max_raise))
+            elif action == A_BET_POT:
+                raise_amt = max(mn, min(pot, max_raise))
+            else:
+                raise_amt = max(mn, min(int(pot * 0.75), max_raise))
         
         raise_amt = max(s.min_raise, min(raise_amt, max_raise))
         s.street_bets[s.street][cp] = max(s.street_bets[s.street][cp], raise_amt)
