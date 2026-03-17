@@ -63,12 +63,17 @@ def _sync(device):
         except Exception: pass
 
 
+def _make_scaler(device):
+    use_amp = (device.type == 'cuda')
+    scaler  = torch.amp.GradScaler('cuda') if use_amp else None
+    return use_amp, scaler
+
+
 def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):
     import torch.optim.lr_scheduler as sched
     import time as _t
 
     t0 = _t.perf_counter()
-    # Cap GPU load: randperm(N) and gather are O(N); 3M is too slow, cap at 512K
     n_load = min(max(batch_size, len(buf)), _GPU_LOAD_CAP)
     data = buf.sample_streets(streets, n_load)
     if data is None:
@@ -84,19 +89,43 @@ def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters,
     _sync(device)
     t2 = _t.perf_counter()
 
-    N = x_all.shape[0]
-    scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
-    total_loss = 0.0
+    N  = x_all.shape[0]
     bs = min(batch_size, N)
-    for _ in range(num_batches):
-        idx = torch.randperm(N, device=device)[:bs]
-        x = x_all[idx]; y = y_all[idx]; w = w_all[idx]; m = m_all[idx]
-        pred  = net(x)
-        loss  = ((pred - y) ** 2 * w.unsqueeze(1) * m).sum() / (m.sum() + 1e-8)
-        opt.zero_grad(); loss.backward()
-        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
-        opt.step(); scheduler.step()
-        total_loss += loss.item()
+    use_amp, scaler = _make_scaler(device)
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+
+    scheduler    = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
+    running_loss = torch.zeros(1, device=device)  # no per-batch CPU sync
+    batch_count  = 0
+
+    # Pre-epoch shuffle: one randperm per epoch instead of per batch
+    while batch_count < num_batches:
+        perm = torch.randperm(N, device=device)
+        for start in range(0, N - bs + 1, bs):
+            if batch_count >= num_batches:
+                break
+            idx = perm[start : start + bs]
+            x = x_all[idx]; y = y_all[idx]; w = w_all[idx]; m = m_all[idx]
+
+            with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
+                pred = net(x)
+                loss = ((pred - y) ** 2 * w.unsqueeze(1) * m).sum() / (m.sum() + 1e-8)
+
+            opt.zero_grad(set_to_none=True)
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+                opt.step()
+
+            scheduler.step()
+            running_loss.add_(loss.detach())
+            batch_count += 1
 
     _sync(device)
     t3 = _t.perf_counter()
@@ -105,7 +134,7 @@ def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters,
     if _PROFILE:
         print(f"    [adv] sample={1000*(t1-t0):.0f}ms  xfer={1000*(t2-t1):.0f}ms"
               f"  train={1000*(t3-t2):.0f}ms  N={N}  bs={bs}")
-    return total_loss / num_batches
+    return running_loss.item() / num_batches
 
 
 def train_strategy_nets(trainer, num_batches: int = None):
@@ -144,20 +173,43 @@ def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_i
     _sync(device)
     t2 = _t.perf_counter()
 
-    N = x_all.shape[0]
-    scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
-    total_loss = 0.0
+    N  = x_all.shape[0]
     bs = min(batch_size, N)
-    for b in range(num_batches):
-        idx = torch.randperm(N, device=device)[:bs]
-        x = x_all[idx]; y = y_all[idx]; w = w_all[idx]; m = m_all[idx]
-        logits    = net(x)
-        log_probs = torch.log_softmax(logits, dim=1)
-        loss      = -(y * log_probs * m * w.unsqueeze(1)).sum() / (m.sum() + 1e-8)
-        opt.zero_grad(); loss.backward()
-        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
-        opt.step(); scheduler.step()
-        total_loss += loss.item()
+    use_amp, scaler = _make_scaler(device)
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+
+    scheduler    = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
+    running_loss = torch.zeros(1, device=device)
+    batch_count  = 0
+
+    while batch_count < num_batches:
+        perm = torch.randperm(N, device=device)
+        for start in range(0, N - bs + 1, bs):
+            if batch_count >= num_batches:
+                break
+            idx = perm[start : start + bs]
+            x = x_all[idx]; y = y_all[idx]; w = w_all[idx]; m = m_all[idx]
+
+            with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
+                logits    = net(x)
+                log_probs = torch.log_softmax(logits, dim=1)
+                loss      = -(y * log_probs * m * w.unsqueeze(1)).sum() / (m.sum() + 1e-8)
+
+            opt.zero_grad(set_to_none=True)
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+                opt.step()
+
+            scheduler.step()
+            running_loss.add_(loss.detach())
+            batch_count += 1
 
     _sync(device)
     t3 = _t.perf_counter()
@@ -166,4 +218,4 @@ def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_i
     if _PROFILE:
         print(f"    [str] sample={1000*(t1-t0):.0f}ms  xfer={1000*(t2-t1):.0f}ms"
               f"  train={1000*(t3-t2):.0f}ms  N={N}  bs={bs}")
-    return total_loss / num_batches
+    return running_loss.item() / num_batches

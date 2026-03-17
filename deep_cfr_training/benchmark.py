@@ -173,17 +173,26 @@ def bench_forward(net, device, reps=30):
     return (time.perf_counter() - t0) / reps * 1000
 
 
-def bench_train_step(net, opt, device, reps=20):
+def bench_train_step(net, opt, device, reps=20, use_amp=False):
     x = torch.randn(BS, FEAT_DIM, device=device)
     y = torch.randn(BS, ACT_DIM,  device=device)
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
     sync(device)
-    for _ in range(3):                              # warmup
-        pred = net(x); loss = ((pred-y)**2).mean()
-        opt.zero_grad(); loss.backward(); opt.step(); sync(device)
+
+    def _step():
+        with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
+            pred = net(x); loss = ((pred-y)**2).mean()
+        opt.zero_grad(set_to_none=True)
+        if use_amp:
+            scaler.scale(loss).backward(); scaler.unscale_(opt)
+            scaler.step(opt); scaler.update()
+        else:
+            loss.backward(); opt.step()
+
+    for _ in range(3): _step(); sync(device)        # warmup
     t0 = time.perf_counter()
-    for _ in range(reps):
-        pred = net(x); loss = ((pred-y)**2).mean()
-        opt.zero_grad(); loss.backward(); opt.step(); sync(device)
+    for _ in range(reps): _step(); sync(device)
     return (time.perf_counter() - t0) / reps * 1000
 
 
@@ -273,8 +282,14 @@ def main():
     print(f"  [3] Forward pass (BS={BS//1024}K):          {f_ms:6.1f} ms")
 
     # ── Stage 4: Full train step (fwd+bwd+opt) ────────────────
-    tr_ms = bench_train_step(net, opt, device, reps=reps)
-    print(f"  [4] fwd+bwd+optimizer step:            {tr_ms:6.1f} ms")
+    tr_ms = bench_train_step(net, opt, device, reps=reps, use_amp=False)
+    print(f"  [4] fwd+bwd+step  FP32:                {tr_ms:6.1f} ms")
+    if device.type == 'cuda':
+        tr_amp_ms = bench_train_step(make_net(device), optim.Adam(make_net(device).parameters(), lr=3e-4),
+                                     device, reps=reps, use_amp=True)
+        print(f"  [4] fwd+bwd+step  BF16-AMP:            {tr_amp_ms:6.1f} ms  ({tr_ms/tr_amp_ms:.1f}x)")
+    else:
+        tr_amp_ms = tr_ms
 
     # ── Stage 5: Traversal ────────────────────────────────────
     trav_ms = None
@@ -293,7 +308,7 @@ def main():
     # GPU preload: sampling done ONCE per net (not 150×)
     sample_s   = (s_ms * N_NETS) / 1000          # 3× sampling per iter
     transfer_s = (t_ms * N_NETS) / 1000          # 3× bulk transfer
-    train_s    = (tr_ms * N_BATCHES * N_NETS) / 1000  # 450 gradient steps
+    train_s    = (tr_amp_ms * N_BATCHES * N_NETS) / 1000  # 450 gradient steps (AMP if CUDA)
     trav_s     = (trav_ms * TRAVERSALS * 2 / 1000) if trav_ms else 2.0
 
     total_s = trav_s + sample_s + transfer_s + train_s
