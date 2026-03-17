@@ -109,7 +109,7 @@ class GameState:
                 raise_amt = max(mn, min(3 * BIG_BLIND, max_raise))   # 6
             elif mn <= 3 * BIG_BLIND:            # 3-bet
                 raise_amt = max(mn, min(3 * mn, max_raise))          # 18
-            else:                                # 4-bet+: all-in (50BB stacks)
+            else:                                # 4-bet+: raise to MAX_BET (50BB per-hand cap)
                 raise_amt = max_raise
             raise_amt = min(raise_amt, max_raise)   # allow incomplete raise (all-in)
         else:
