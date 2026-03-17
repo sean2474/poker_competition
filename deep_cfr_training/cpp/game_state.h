@@ -133,9 +133,7 @@ struct GameState {
                 raise_amt = std::max(mn, std::min(3 * BIG_BLIND, max_raise));      // 6
             else if (mn <= 3 * BIG_BLIND)               // 3-bet
                 raise_amt = std::max(mn, std::min(3 * mn, max_raise));             // 18
-            else if (mn <= 9 * BIG_BLIND)               // 4-bet: fixed 2.5x 3-bet
-                raise_amt = std::max(mn, std::min(45, max_raise));                 // 45
-            else                                        // 5-bet+: all-in
+            else                                        // 4-bet+: all-in (50BB stacks)
                 raise_amt = max_raise;
         } else {
             // Postflop: pot-relative sizing
