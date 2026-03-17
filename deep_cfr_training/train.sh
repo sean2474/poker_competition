@@ -37,7 +37,7 @@ echo "Iterations: $ITERS, Traversals: $TRAVERSALS"
 echo "Batch size: $BATCH_SIZE, Train batches: $TRAIN_BATCHES"
 echo ""
 
-python deep_cfr.py \
+python run.py \
     --iterations "$ITERS" \
     --traversals "$TRAVERSALS" \
     --batch-size "$BATCH_SIZE" \
