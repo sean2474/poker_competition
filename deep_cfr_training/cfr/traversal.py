@@ -1,11 +1,14 @@
 """
-External sampling CFR traversal.
+Hybrid CFR traversal.
 
-traverse_coro: generator that yields (features, valid_actions, cp, street)
-               and receives strategy dict via .send().
+Preflop nodes:  tabular CFR (regrets dict on trainer)
+Postflop nodes: neural network (batch inference via generator yield)
 
-run_traversals_batched: runs N coroutines simultaneously, routing inference
-                        requests to preflop or postflop advantage networks.
+traverse_coro: generator — yields (features, valid_actions, cp, street) at
+               postflop nodes; handles preflop internally via tabular lookup.
+
+run_traversals_batched: N coroutines simultaneously, batch-inferring only
+                        postflop nodes (preflop uses tabular — no network call).
 """
 
 import random
@@ -14,9 +17,13 @@ import torch
 
 from game import GameState, state_to_features, evaluate_showdown, batch_deal_discard
 from game.constants import NUM_ACTIONS
+from preflop_solver.canonical import canonicalize
 
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _regret_matching(adv_arr, valid_actions: list) -> dict:
+    """Regret matching for postflop neural network output."""
     total = 0.0
     best_a, best_v = valid_actions[0], -1e9
     for a in valid_actions:
@@ -31,12 +38,33 @@ def _regret_matching(adv_arr, valid_actions: list) -> dict:
     return {a: (1.0 if a == best_a else 0.0) for a in valid_actions}
 
 
+def _tabular_strategy(regrets: np.ndarray, valid_actions: list) -> dict:
+    """CFR+ regret matching for tabular preflop regrets."""
+    pos = [max(float(regrets[a]), 0.0) for a in valid_actions]
+    total = sum(pos)
+    if total > 0:
+        inv = 1.0 / total
+        return {a: pos[i] * inv for i, a in enumerate(valid_actions)}
+    n = len(valid_actions)
+    return {a: 1.0 / n for a in valid_actions}
+
+
+def _preflop_key(hand5, state) -> tuple:
+    """Tabular infoset key: (canonical_hand, history_string)."""
+    canon = canonicalize(hand5)
+    hist  = ''.join(_ACTION_CHAR.get(a, '?') for _, a in state.history)
+    return (canon, hist)
+
+
+_ACTION_CHAR = {0: 'f', 1: 'c', 2: 'k', 3: 'b', 4: 'B', 5: 'r', 6: 'R', 7: 'p'}
+
+
 def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
                   community, p0_disc, p1_disc, traversing_player):
     """
-    Generator traversal.
-    Yields (features, valid_actions, cp, street) for batch inference.
-    Receives strategy dict via .send(strategy).
+    Hybrid generator traversal.
+    - Preflop (street=0): tabular CFR regrets — handled inline, no yield.
+    - Postflop (street>0): neural net — yields for batch inference.
     """
     if state.is_terminal:
         if state.folded_player >= 0:
@@ -60,11 +88,48 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
         hand, hand5, is_bb = p1_hand, p1_hand5, True
         my_disc, opp_disc  = p1_disc, p0_disc
 
+    # ── PREFLOP: tabular CFR (no network inference) ───────────────────────
+    if state.street == 0:
+        key  = _preflop_key(hand5, state)
+        regs = trainer.preflop_regrets.get(key, np.zeros(NUM_ACTIONS))
+        strategy = _tabular_strategy(regs, valid_actions)
+
+        # Explore ALL actions (complete tree for preflop)
+        action_values = {}
+        for a in valid_actions:
+            ns  = state.apply(a)
+            sub = traverse_coro(trainer, ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
+                                 community, p0_disc, p1_disc, traversing_player)
+            try:
+                req = next(sub)
+                while True:
+                    resp = yield req   # forward postflop inference requests up
+                    req  = sub.send(resp)
+            except StopIteration as e:
+                action_values[a] = e.value
+
+        ev = sum(strategy.get(a, 0) * action_values[a] for a in valid_actions)
+
+        if cp == traversing_player:
+            # CFR+ regret update (clip negatives to 0)
+            r = trainer.preflop_regrets.setdefault(key, np.zeros(NUM_ACTIONS))
+            for a in valid_actions:
+                r[a] = max(0.0, r[a] + action_values[a] - ev)
+
+        # Linear-weighted strategy accumulation (both players)
+        s = trainer.preflop_strategy_sum.setdefault(key, np.zeros(NUM_ACTIONS))
+        t = float(trainer.iteration)
+        for a in valid_actions:
+            s[a] += t * strategy.get(a, 0.0)
+
+        return ev
+
+    # ── POSTFLOP: neural network (batch inference via yield) ──────────────
     vis_comm = ([], community[:3], community[:4], community[:5])[min(state.street, 3)]
     features = state_to_features(
         hand, vis_comm, state.bets[cp], state.bets[1 - cp],
         state.street, is_bb, my_disc, opp_disc,
-        hero_hand5=hand5 if state.street == 0 else None,
+        hero_hand5=None,
         street_bets=state.street_bets,
     )
 
@@ -104,7 +169,6 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
         trainer.strategy_buffer.add(
             features, strat_target, trainer.iteration, valid_mask, street=state.street
         )
-
         chosen = random.choices(list(strategy.keys()),
                                 weights=list(strategy.values()), k=1)[0]
         ns  = state.apply(chosen)
@@ -121,8 +185,9 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
 
 def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player: int):
     """
-    Run N traversals simultaneously with batch inference.
-    Routes to preflop_adv_nets (street=0) or adv_nets (street>0).
+    Run N traversals simultaneously.
+    Preflop nodes are handled inline (tabular CFR, no yield).
+    Only postflop nodes appear in pending → batch by player only.
     """
     r = batch_deal_discard(traversals_per_iter)
     p0h, p1h, p0d, p1d, comms, p0h5, p1h5 = r
@@ -146,25 +211,21 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
             del gens[i]
 
     while pending:
-        # Batch by (player, is_preflop) — 4 possible groups
+        # All pending nodes are postflop → batch by player only
         for p in [0, 1]:
-            for is_pf in [True, False]:
-                idxs = [i for i in list(pending.keys())
-                        if pending[i][2] == p and (pending[i][3] == 0) == is_pf]
-                if not idxs:
-                    continue
+            idxs = [i for i in list(pending.keys()) if pending[i][2] == p]
+            if not idxs:
+                continue
 
-                feats = np.stack([pending[i][0] for i in idxs])
-                x     = torch.tensor(feats, dtype=torch.float32)
-                net   = trainer.pf_adv_nets[p] if is_pf else trainer.adv_nets[p]
+            feats = np.stack([pending[i][0] for i in idxs])
+            x     = torch.tensor(feats, dtype=torch.float32)
+            with torch.no_grad():
+                adv_batch = trainer.adv_nets[p](x).numpy()
 
-                with torch.no_grad():
-                    adv_batch = net(x).numpy()
-
-                for j, i in enumerate(idxs):
-                    _, valid_actions, _, _ = pending.pop(i)
-                    strategy = _regret_matching(adv_batch[j], valid_actions)
-                    try:
-                        pending[i] = gens[i].send(strategy)
-                    except StopIteration:
-                        del gens[i]
+            for j, i in enumerate(idxs):
+                _, valid_actions, _, _ = pending.pop(i)
+                strategy = _regret_matching(adv_batch[j], valid_actions)
+                try:
+                    pending[i] = gens[i].send(strategy)
+                except StopIteration:
+                    del gens[i]

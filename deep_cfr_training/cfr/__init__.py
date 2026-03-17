@@ -4,9 +4,11 @@ Deep CFR trainer — composes traversal + training + runner.
 
 import torch
 
+import numpy as np
+
 from models import (
-    PreflopAdvantageNet,  PostflopAdvantageNet,
-    PreflopStrategyNet,   PostflopStrategyNet,
+    PostflopAdvantageNet,
+    PostflopStrategyNet,
     ReservoirBuffer,
 )
 from .runner   import run, save_checkpoint, load_checkpoint, export
@@ -26,16 +28,19 @@ print(f'Training device: {DEVICE}')
 
 class DeepCFR:
     """
-    Deep CFR trainer with separate preflop / postflop networks.
+    Hybrid CFR trainer.
 
-    Networks:
-      pf_adv_nets[2]    : preflop advantage nets (street 0 samples)
-      adv_nets[2]       : postflop advantage nets (streets 1-3 samples)
-      pf_strategy_net   : preflop average strategy
-      strategy_net      : postflop average strategy
+    Preflop (street=0): tabular CFR — preflop_regrets / preflop_strategy_sum
+      - Infoset key: (canonical_hand_tuple, history_string)
+      - CFR+ regret updates, linear-weighted strategy sum
+      - No neural network needed for preflop
 
-    Buffers (stratified by street):
-      adv_buffers[2]    : advantage memories per player
+    Postflop (streets 1-3): neural network
+      - adv_nets[2]     : PostflopAdvantageNet per player
+      - strategy_net    : PostflopStrategyNet (average strategy)
+
+    Buffers (postflop only, stratified by street):
+      adv_buffers[2]    : advantage memories
       strategy_buffer   : strategy memories
     """
 
@@ -43,15 +48,18 @@ class DeepCFR:
         self.lr     = lr
         self.device = DEVICE
 
-        # Advantage nets (stay on CPU during traversal, move to GPU for training)
-        self.pf_adv_nets = [PreflopAdvantageNet()  for _ in range(2)]
+        # Postflop advantage nets (CPU during traversal, GPU during training)
         self.adv_nets    = [PostflopAdvantageNet() for _ in range(2)]
 
-        # Strategy nets
-        self.pf_strategy_net = PreflopStrategyNet()
-        self.strategy_net    = PostflopStrategyNet()
+        # Postflop average strategy net
+        self.strategy_net = PostflopStrategyNet()
 
-        # Buffers
+        # Preflop tabular CFR tables
+        # key: (canonical_hand_tuple, history_str)  value: np.array(NUM_ACTIONS)
+        self.preflop_regrets      = {}
+        self.preflop_strategy_sum = {}
+
+        # Postflop buffers
         self.adv_buffers     = [ReservoirBuffer(buffer_size) for _ in range(2)]
         self.strategy_buffer = ReservoirBuffer(buffer_size)
 

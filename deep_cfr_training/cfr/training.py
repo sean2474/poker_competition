@@ -11,8 +11,8 @@ import torch
 import torch.optim as optim
 
 from models import (
-    PreflopAdvantageNet, PostflopAdvantageNet,
-    PreflopStrategyNet,  PostflopStrategyNet,
+    PostflopAdvantageNet,
+    PostflopStrategyNet,
 )
 
 
@@ -29,7 +29,8 @@ def _to_device(arr, device, dtype=torch.float32):
 
 def train_adv_networks(trainer) -> list:
     """
-    Train preflop and postflop advantage nets FROM SCRATCH (paper Section 5.2).
+    Train postflop advantage nets FROM SCRATCH (paper Section 5.2).
+    Preflop is handled by tabular CFR in traversal — no net needed.
     Returns [loss_p0, loss_p1].
     """
     device  = trainer.device
@@ -39,16 +40,6 @@ def train_adv_networks(trainer) -> list:
 
     for p in range(2):
         buf = trainer.adv_buffers[p]
-
-        # ── Preflop net (street 0) ──────────────────────────────────────────
-        if buf.street_bufs[0]:
-            trainer.pf_adv_nets[p] = PreflopAdvantageNet().to(device)
-            opt = optim.Adam(trainer.pf_adv_nets[p].parameters(), lr=trainer.lr)
-            _train_adv_net(trainer.pf_adv_nets[p], opt, buf, [0],
-                           bs, n_batch, trainer.total_iterations, device)
-            trainer.pf_adv_nets[p] = trainer.pf_adv_nets[p].cpu()
-
-        # ── Postflop net (streets 1-3) ──────────────────────────────────────
         postflop_has_data = any(buf.street_bufs[s] for s in [1, 2, 3])
         if postflop_has_data:
             trainer.adv_nets[p] = PostflopAdvantageNet().to(device)
@@ -84,18 +75,11 @@ def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters,
 
 
 def train_strategy_nets(trainer, num_batches: int = None):
-    """Train preflop and postflop strategy nets from strategy buffer."""
+    """Train postflop strategy net. Preflop = tabular chart (no net needed)."""
     device  = trainer.device
     bs      = trainer.batch_size
     n_batch = num_batches or trainer.num_batches * 3
     buf     = trainer.strategy_buffer
-
-    if buf.street_bufs[0]:
-        trainer.pf_strategy_net = PreflopStrategyNet().to(device)
-        opt = optim.Adam(trainer.pf_strategy_net.parameters(), lr=trainer.lr)
-        _train_strategy_net(trainer.pf_strategy_net, opt, buf, [0],
-                            bs, n_batch, trainer.total_iterations, device)
-        trainer.pf_strategy_net = trainer.pf_strategy_net.cpu()
 
     postflop_has_data = any(buf.street_bufs[s] for s in [1, 2, 3])
     if postflop_has_data:

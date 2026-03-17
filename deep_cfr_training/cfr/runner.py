@@ -80,56 +80,75 @@ def run(trainer, num_iterations=500, traversals_per_iter=1000,
 
 
 def save_checkpoint(trainer, path, iteration):
+    import pickle
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     torch.save({
-        'iteration':         iteration,
-        'total_iterations':  trainer.total_iterations,
-        'pf_adv_net_0':      trainer.pf_adv_nets[0].state_dict(),
-        'pf_adv_net_1':      trainer.pf_adv_nets[1].state_dict(),
-        'adv_net_0':         trainer.adv_nets[0].state_dict(),
-        'adv_net_1':         trainer.adv_nets[1].state_dict(),
-        'pf_strategy_net':   trainer.pf_strategy_net.state_dict(),
-        'strategy_net':      trainer.strategy_net.state_dict(),
+        'iteration':        iteration,
+        'total_iterations': trainer.total_iterations,
+        'adv_net_0':        trainer.adv_nets[0].state_dict(),
+        'adv_net_1':        trainer.adv_nets[1].state_dict(),
+        'strategy_net':     trainer.strategy_net.state_dict(),
     }, path)
+    # Preflop tables saved alongside (pickle — dicts can be huge)
+    pf_path = path + '.preflop.pkl'
+    with open(pf_path, 'wb') as f:
+        pickle.dump({
+            'regrets':      trainer.preflop_regrets,
+            'strategy_sum': trainer.preflop_strategy_sum,
+        }, f)
 
 
 def load_checkpoint(trainer, path) -> int:
+    import pickle
     if not os.path.exists(path):
         return 0
     ckpt = torch.load(path, map_location='cpu')
-    trainer.pf_adv_nets[0].load_state_dict(ckpt['pf_adv_net_0'])
-    trainer.pf_adv_nets[1].load_state_dict(ckpt['pf_adv_net_1'])
     trainer.adv_nets[0].load_state_dict(ckpt['adv_net_0'])
     trainer.adv_nets[1].load_state_dict(ckpt['adv_net_1'])
-    trainer.pf_strategy_net.load_state_dict(ckpt['pf_strategy_net'])
     trainer.strategy_net.load_state_dict(ckpt['strategy_net'])
     trainer.total_iterations = ckpt.get('total_iterations', trainer.total_iterations)
+    # Load preflop tables if available
+    pf_path = path + '.preflop.pkl'
+    if os.path.exists(pf_path):
+        with open(pf_path, 'rb') as f:
+            pf = pickle.load(f)
+        trainer.preflop_regrets      = pf.get('regrets', {})
+        trainer.preflop_strategy_sum = pf.get('strategy_sum', {})
     it = ckpt.get('iteration', 0)
-    print(f"Resumed checkpoint: iter {it}/{trainer.total_iterations}")
+    print(f"Resumed checkpoint: iter {it}/{trainer.total_iterations}  "
+          f"(preflop infosets: {len(trainer.preflop_regrets):,})")
     return it
 
 
 def export(trainer, path_prefix):
-    """Export strategy nets for submission inference."""
+    """Export strategy nets + preflop chart for submission inference."""
+    import pickle, numpy as np
     os.makedirs(os.path.dirname(path_prefix) or '.', exist_ok=True)
 
-    # Postflop strategy (most valuable — majority of decisions)
-    torch.save(trainer.strategy_net.state_dict(),    path_prefix + '_strategy.pt')
-    # Preflop strategy
-    torch.save(trainer.pf_strategy_net.state_dict(), path_prefix + '_pf_strategy.pt')
+    # Postflop strategy net
+    torch.save(trainer.strategy_net.state_dict(), path_prefix + '_strategy.pt')
+
+    # Preflop chart: normalize strategy_sum → probabilities
+    preflop_chart = {}
+    for key, s_sum in trainer.preflop_strategy_sum.items():
+        total = s_sum.sum()
+        preflop_chart[key] = s_sum / total if total > 0 else s_sum.copy()
+    pf_chart_path = path_prefix + '_preflop_chart.pkl'
+    with open(pf_chart_path, 'wb') as f:
+        pickle.dump(preflop_chart, f)
+
     # Full checkpoint
     torch.save({
-        'strategy_net':    trainer.strategy_net.state_dict(),
-        'pf_strategy_net': trainer.pf_strategy_net.state_dict(),
-        'adv_net_0':       trainer.adv_nets[0].state_dict(),
-        'adv_net_1':       trainer.adv_nets[1].state_dict(),
-        'iteration':       trainer.iteration,
+        'strategy_net': trainer.strategy_net.state_dict(),
+        'adv_net_0':    trainer.adv_nets[0].state_dict(),
+        'adv_net_1':    trainer.adv_nets[1].state_dict(),
+        'iteration':    trainer.iteration,
     }, path_prefix + '_full.pt')
 
-    n_pf = sum(p.numel() for p in trainer.pf_strategy_net.parameters())
-    n_pf_sz = os.path.getsize(path_prefix + '_pf_strategy.pt') / 1024
-    n_po = sum(p.numel() for p in trainer.strategy_net.parameters())
+    n_po    = sum(p.numel() for p in trainer.strategy_net.parameters())
     n_po_sz = os.path.getsize(path_prefix + '_strategy.pt') / 1024
+    n_pf_keys = len(preflop_chart)
+    pf_sz   = os.path.getsize(pf_chart_path) / 1024
     print(f"Exported:")
-    print(f"  Preflop  strategy: {n_pf:,} params, {n_pf_sz:.0f} KB  → {path_prefix}_pf_strategy.pt")
     print(f"  Postflop strategy: {n_po:,} params, {n_po_sz:.0f} KB  → {path_prefix}_strategy.pt")
+    print(f"  Preflop chart:     {n_pf_keys:,} infosets, {pf_sz:.0f} KB  → {pf_chart_path}")
