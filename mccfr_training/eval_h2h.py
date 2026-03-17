@@ -53,8 +53,10 @@ def convert_bin(bin_path):
     per_node = (len(data) - 8) / nodes if nodes > 0 else 42
     has_conf = (per_node >= 49.5)
 
-    ACTION_LISTS = [('FOLD','CALL'),('FOLD','CALL'),('FOLD','CALL','RAISE_SMALL','RAISE_LARGE'),
-                    ('CHECK','BET_SMALL','BET_LARGE'),('CHECK',)]
+    ACTION_LISTS = [('FOLD','CALL'),
+                    ('FOLD','CALL','RAISE_SMALL','RAISE_LARGE'),
+                    ('CHECK',),
+                    ('CHECK','BET_SMALL','BET_LARGE')]
     MAX_ACTIONS = 4
 
     keys = np.zeros(nodes, dtype=np.uint64)
@@ -365,7 +367,7 @@ class SimpleAgent:
         spread = mx - mn
         if spread <= 0: return mn
         if chosen_abs in ("BET_LARGE","RAISE_LARGE"): fracs = [0.55,0.70,0.85,1.0]
-        else: fracs = [0.10,0.20,0.30,0.40]
+        else: fracs = [0.10,0.20,0.33,0.50]
         cands = sorted(set(max(mn, min(mn+int(spread*f), mx)) for f in fracs))
         if len(cands) <= 1: return cands[0] if cands else mn
 

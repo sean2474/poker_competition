@@ -22,6 +22,8 @@ from preflop_cfr.canonical import canonicalize
 WARMUP_ITERS       = 50    # hard fallback (if buffer never fills for some reason)
 MIN_WARMUP_SAMPLES = 2000  # per street per player before switching to neural net
 
+_rng = np.random.default_rng()
+
 
 def _postflop_ready(trainer) -> bool:
     """Switch from warmup equity to neural net when buffer is sufficiently warm."""
@@ -126,30 +128,51 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
         regs = trainer.preflop_regrets.get(key, np.zeros(_PF_SLOTS))
         strategy = _tabular_strategy(regs, valid_actions)
 
-        # Explore ALL actions (complete tree for preflop)
-        action_values = {}
-        for a in valid_actions:
-            ns  = state.apply(a)
-            sub = traverse_coro(trainer, ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
-                                 community, p0_disc, p1_disc, traversing_player)
-            try:
-                req = next(sub)
-                while True:
-                    resp = yield req   # forward postflop inference requests up
-                    req  = sub.send(resp)
-            except StopIteration as e:
-                action_values[a] = e.value
-
-        ev = sum(strategy.get(a, 0) * action_values[a] for a in valid_actions)
-
         if cp == traversing_player:
+            # Traversing player: explore ALL branches for regret update
+            action_values = {}
+            for a in valid_actions:
+                ns  = state.apply(a)
+                sub = traverse_coro(trainer, ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
+                                     community, p0_disc, p1_disc, traversing_player)
+                try:
+                    req = next(sub)
+                    while True:
+                        resp = yield req
+                        req  = sub.send(resp)
+                except StopIteration as e:
+                    action_values[a] = e.value
+
+            ev = sum(strategy.get(a, 0) * action_values[a] for a in valid_actions)
+
             # CFR+ regret update on 3 abstract slots
             r = trainer.preflop_regrets.setdefault(key, np.zeros(_PF_SLOTS))
             for a in valid_actions:
                 slot = _PF_SLOT.get(a, 2)
                 r[slot] = max(0.0, r[slot] + action_values[a] - ev)
+        else:
+            # Opponent (external sampling): sample ONE action to cut branching 3-9x
+            weights = [max(strategy.get(a, 0.0), 0.0) for a in valid_actions]
+            total_w = sum(weights)
+            if total_w > 0:
+                weights = [w / total_w for w in weights]
+            else:
+                n = len(valid_actions)
+                weights = [1.0 / n] * n
+            a_sampled = _rng.choice(len(valid_actions), p=np.array(weights, dtype=np.float64))
+            a_sampled = valid_actions[a_sampled]
+            ns  = state.apply(a_sampled)
+            sub = traverse_coro(trainer, ns, p0_hand, p1_hand, p0_hand5, p1_hand5,
+                                 community, p0_disc, p1_disc, traversing_player)
+            try:
+                req = next(sub)
+                while True:
+                    resp = yield req
+                    req  = sub.send(resp)
+            except StopIteration as e:
+                ev = e.value
 
-        # Linear-weighted strategy accumulation (3 abstract slots)
+        # Linear-weighted strategy accumulation for current player
         s = trainer.preflop_strategy_sum.setdefault(key, np.zeros(_PF_SLOTS))
         t = float(trainer.iteration)
         for a in valid_actions:

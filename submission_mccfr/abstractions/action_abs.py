@@ -55,9 +55,9 @@ def get_valid_abstract_actions(valid_actions: list, my_bet: int, opp_bet: int,
 def abstract_to_concrete(action: str, min_raise: int, max_raise: int,
                           my_bet: int, opp_bet: int) -> tuple:
     """
-    Size mapping:
-      BET_SMALL / RAISE_SMALL -> 25% of spread
-      BET_LARGE / RAISE_LARGE -> 70% of spread
+    Size mapping (matches C++ cfr_engine.h training sizing):
+      BET_SMALL / RAISE_SMALL -> min_raise + spread * 0.25
+      BET_LARGE / RAISE_LARGE -> min_raise + spread * 0.70
     """
     if action == "FOLD":
         return (_FOLD, 0, 0, 0)

@@ -265,11 +265,11 @@ class PlayerAgent(Agent):
         if spread <= 0:
             return min_raise
 
-        # Define candidate sizes based on action type
+        # Define candidate sizes based on action type (matches C++ cfr_engine.h sizing)
         if chosen_abs in ("BET_LARGE", "RAISE_LARGE"):
-            fracs = [0.55, 0.70, 0.85, 1.0]
+            fracs = [0.55, 0.70, 0.85, 1.00]
         elif chosen_abs in ("BET_SMALL", "RAISE_SMALL"):
-            fracs = [0.10, 0.20, 0.30, 0.40]
+            fracs = [0.10, 0.20, 0.33, 0.50]
         else:
             return min_raise
 
