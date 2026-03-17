@@ -64,15 +64,16 @@ struct GameState {
         } else {
             actions[n++] = A_CHECK;
             if (can_raise) {
-                actions[n++] = A_BET_SMALL;
-                // Only add BET_POT if meaningfully different from BET_LARGE
-                int spread = max_raise - min_raise;
-                int large_amt = min_raise + spread * 7 / 10;
                 int pot = bets[0] + bets[1];
-                int pot_amt = std::max(min_raise, std::min(pot, (int)max_raise));
+                // Pot-relative sizing: 33% / 75% / 100% of pot
+                int small_amt = std::max(min_raise, std::min(pot * 33 / 100, max_raise));
+                int large_amt = std::max(min_raise, std::min(pot * 75 / 100, max_raise));
+                int pot_amt   = std::max(min_raise, std::min(pot,             max_raise));
+                actions[n++] = A_BET_SMALL;
                 if (std::abs(pot_amt - large_amt) > 2)
                     actions[n++] = A_BET_POT;
-                actions[n++] = A_BET_LARGE;
+                if (std::abs(large_amt - small_amt) > 2)
+                    actions[n++] = A_BET_LARGE;
             }
         }
     }
@@ -114,15 +115,15 @@ struct GameState {
         // Raise/bet
         s.num_actions_this_street++;
         if (st < 4) s.street_bets[st][cp]++;
-        int spread = max_raise - s.min_raise;
         int pot = s.bets[0] + s.bets[1];
+        int mn = s.min_raise;
         int raise_amt;
         if (action == A_BET_SMALL || action == A_RAISE_SMALL) {
-            raise_amt = s.min_raise + spread / 4;
+            raise_amt = std::max(mn, std::min(pot * 33 / 100, max_raise));
         } else if (action == A_BET_POT) {
-            raise_amt = std::max(s.min_raise, std::min(pot, max_raise));
-        } else {
-            raise_amt = s.min_raise + spread * 7 / 10;
+            raise_amt = std::max(mn, std::min(pot, max_raise));
+        } else {  // BET_LARGE / RAISE_LARGE
+            raise_amt = std::max(mn, std::min(pot * 75 / 100, max_raise));
         }
         raise_amt = std::max(s.min_raise, std::min(raise_amt, max_raise));
         s.bets[cp] = s.bets[opp] + raise_amt;

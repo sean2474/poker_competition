@@ -187,15 +187,18 @@ class GameState:
         else:
             actions.append(A_CHECK)
             if can_raise:
-                actions.append(A_BET_SMALL)
-                # Only add BET_POT if it's meaningfully different from BET_LARGE
-                spread = max_raise - self.min_raise
-                large_amt = self.min_raise + int(spread * 0.70)
                 pot = self.bets[0] + self.bets[1]
-                pot_amt = max(self.min_raise, min(pot, max_raise))
+                mn = self.min_raise
+                # Pot-relative sizing: 33% / 75% / 100% of pot
+                small_amt = max(mn, min(int(pot * 0.33), max_raise))
+                large_amt = max(mn, min(int(pot * 0.75), max_raise))
+                pot_amt   = max(mn, min(pot,             max_raise))
+                # Add deduplicated actions (skip if within 2 chips of a larger one)
+                actions.append(A_BET_SMALL)
                 if abs(pot_amt - large_amt) > 2:
                     actions.append(A_BET_POT)
-                actions.append(A_BET_LARGE)
+                if abs(large_amt - small_amt) > 2:
+                    actions.append(A_BET_LARGE)
         return actions
     
     def apply(self, action):
@@ -233,14 +236,14 @@ class GameState:
         # Raise/bet
         s.num_actions_this_street += 1
         s.street_bets[s.street][cp] += 1
-        spread = max_raise - s.min_raise
         pot = s.bets[0] + s.bets[1]
+        mn = s.min_raise
         if action in (A_BET_SMALL, A_RAISE_SMALL):
-            raise_amt = s.min_raise + int(spread * 0.25)
+            raise_amt = max(mn, min(int(pot * 0.33), max_raise))
         elif action == A_BET_POT:
-            raise_amt = max(s.min_raise, min(pot, max_raise))
-        else:
-            raise_amt = s.min_raise + int(spread * 0.70)
+            raise_amt = max(mn, min(pot, max_raise))
+        else:  # BET_LARGE / RAISE_LARGE
+            raise_amt = max(mn, min(int(pot * 0.75), max_raise))
         
         raise_amt = max(s.min_raise, min(raise_amt, max_raise))
         s.bets[cp] = s.bets[opp] + raise_amt
