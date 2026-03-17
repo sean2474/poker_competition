@@ -52,23 +52,39 @@ def train_adv_networks(trainer) -> list:
     return losses
 
 
+_GPU_LOAD_CAP = 524_288    # 512K — limits randperm N and GPU memory pressure
+_PROFILE      = False      # flip True to print per-phase ms once for debugging
+
+
+def _sync(device):
+    if device.type == 'cuda': torch.cuda.synchronize()
+    elif device.type == 'mps':
+        try: torch.mps.synchronize()
+        except Exception: pass
+
+
 def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):
     import torch.optim.lr_scheduler as sched
-    # Load entire buffer to GPU once — eliminates per-batch CPU sampling overhead
-    n_load = max(batch_size * num_batches, len(buf))
+    import time as _t
+
+    t0 = _t.perf_counter()
+    # Cap GPU load: randperm(N) and gather are O(N); 3M is too slow, cap at 512K
+    n_load = min(max(batch_size, len(buf)), _GPU_LOAD_CAP)
     data = buf.sample_streets(streets, n_load)
     if data is None:
         return 0.0
     features, values, iterations, masks = data
     weights = (2.0 * iterations / max(total_iters, 1)).astype('float32')
+    t1 = _t.perf_counter()
 
-    import numpy as _np
     x_all = _to_device(features, device)
     y_all = _to_device(values,   device)
     w_all = _to_device(weights,  device)
     m_all = _to_device(masks,    device)
-    N = x_all.shape[0]
+    _sync(device)
+    t2 = _t.perf_counter()
 
+    N = x_all.shape[0]
     scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
     total_loss = 0.0
     bs = min(batch_size, N)
@@ -82,7 +98,13 @@ def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters,
         opt.step(); scheduler.step()
         total_loss += loss.item()
 
+    _sync(device)
+    t3 = _t.perf_counter()
     del x_all, y_all, w_all, m_all
+
+    if _PROFILE:
+        print(f"    [adv] sample={1000*(t1-t0):.0f}ms  xfer={1000*(t2-t1):.0f}ms"
+              f"  train={1000*(t3-t2):.0f}ms  N={N}  bs={bs}")
     return total_loss / num_batches
 
 
@@ -104,20 +126,25 @@ def train_strategy_nets(trainer, num_batches: int = None):
 
 def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):
     import torch.optim.lr_scheduler as sched
-    # Load entire buffer to GPU once
-    n_load = max(batch_size * num_batches, len(buf))
+    import time as _t
+
+    t0 = _t.perf_counter()
+    n_load = min(max(batch_size, len(buf)), _GPU_LOAD_CAP)
     data = buf.sample_streets(streets, n_load)
     if data is None:
         return 0.0
     features, strategies, iterations, masks = data
     weights = (2.0 * iterations / max(total_iters, 1)).astype('float32')
+    t1 = _t.perf_counter()
 
     x_all = _to_device(features,   device)
     y_all = _to_device(strategies, device)
     w_all = _to_device(weights,    device)
     m_all = _to_device(masks,      device)
-    N = x_all.shape[0]
+    _sync(device)
+    t2 = _t.perf_counter()
 
+    N = x_all.shape[0]
     scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
     total_loss = 0.0
     bs = min(batch_size, N)
@@ -132,5 +159,11 @@ def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_i
         opt.step(); scheduler.step()
         total_loss += loss.item()
 
+    _sync(device)
+    t3 = _t.perf_counter()
     del x_all, y_all, w_all, m_all
+
+    if _PROFILE:
+        print(f"    [str] sample={1000*(t1-t0):.0f}ms  xfer={1000*(t2-t1):.0f}ms"
+              f"  train={1000*(t3-t2):.0f}ms  N={N}  bs={bs}")
     return total_loss / num_batches
