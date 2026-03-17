@@ -302,60 +302,49 @@ class DeepCFR:
 
     def run_traversals_batched(self, traversals_per_iter, traversing_player):
         """
-        Run `traversals_per_iter` traversals simultaneously.
-        At each inference step, batch all waiting generators → single GPU forward.
+        Run all traversals simultaneously (all-at-once).
+        All N generators are active together → maximizes inference batch size.
+        Sliding window is slower: smaller window = smaller inference batch = more overhead.
         """
-        # Deal all games at once via C++
-        r = __import__('game_env', fromlist=['batch_deal_discard']).batch_deal_discard(traversals_per_iter)
+        from game_env import batch_deal_discard
+
+        r = batch_deal_discard(traversals_per_iter)
         p0h, p1h, p0d, p1d, comms, p0h5, p1h5 = r
 
-        # Init generators
+        # Start all generators
         gens = {}
+        pending = {}
         for i in range(traversals_per_iter):
-            p0_hand = list(p0h[i])
-            p1_hand = list(p1h[i])
-            p0_disc = list(p0d[i])
-            p1_disc = list(p1d[i])
-            comm = list(comms[i])
-            p0_5 = list(p0h5[i])
-            p1_5 = list(p1h5[i])
-            g = self.traverse_coro(GameState(), p0_hand, p1_hand, p0_5, p1_5,
-                                    comm, p0_disc, p1_disc, traversing_player)
+            g = self.traverse_coro(
+                GameState(), list(p0h[i]), list(p1h[i]),
+                list(p0h5[i]), list(p1h5[i]),
+                list(comms[i]), list(p0d[i]), list(p1d[i]),
+                traversing_player
+            )
             gens[i] = g
-
-        # Bootstrap: start all generators
-        pending = {}  # idx → (features, valid_actions, cp)
-        for i, g in list(gens.items()):
             try:
-                req = next(g)
-                pending[i] = req
+                pending[i] = next(g)
             except StopIteration:
                 del gens[i]
 
-        # Run until all done
         while pending:
-            # Process each player's batch
             for p in [0, 1]:
                 p_idxs = [i for i in list(pending.keys()) if pending[i][2] == p]
                 if not p_idxs:
                     continue
 
-                # Batch forward on CPU (adv_nets are on CPU during traversal)
                 feats = np.stack([pending[i][0] for i in p_idxs])
-                x = torch.tensor(feats, dtype=torch.float32)  # CPU
+                x = torch.tensor(feats, dtype=torch.float32)
                 with torch.no_grad():
                     adv_batch = self.adv_nets[p](x).numpy()
 
-                # Resume each generator
                 for j, i in enumerate(p_idxs):
                     _, valid_actions, _ = pending.pop(i)
                     strategy = self._regret_matching(adv_batch[j], valid_actions)
                     try:
-                        new_req = gens[i].send(strategy)
-                        pending[i] = new_req
+                        pending[i] = gens[i].send(strategy)
                     except StopIteration:
-                        if i in gens:
-                            del gens[i]
+                        del gens[i]
 
     @staticmethod
     def _to_device(arr, dtype=torch.float32):
