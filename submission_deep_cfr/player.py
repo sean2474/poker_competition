@@ -53,32 +53,45 @@ class _StrategyNet:
     def __init__(self, state_dict: dict):
         import torch
         import torch.nn as nn
-        H = 256
+        H = 512
+
+        class _ResBlock(nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.fc1 = nn.Linear(dim, dim); self.ln1 = nn.LayerNorm(dim)
+                self.fc2 = nn.Linear(dim, dim); self.ln2 = nn.LayerNorm(dim)
+            def forward(self, x):
+                h = torch.relu(self.ln1(self.fc1(x)))
+                return torch.relu(self.ln2(self.fc2(h)) + x)
 
         class _Net(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.net = nn.Sequential(
-                    nn.Linear(FEATURE_DIM, H), nn.ReLU(),
-                    nn.Linear(H, H), nn.ReLU(),
-                    nn.Linear(H, H), nn.ReLU(),
-                    nn.Linear(H, NUM_ACTIONS),
-                )
-            def forward(self, x): return self.net(x)
+                self.embed = nn.Sequential(nn.Linear(FEATURE_DIM, H), nn.ReLU())
+                self.res   = nn.Sequential(_ResBlock(H), _ResBlock(H), _ResBlock(H))
+                self.head  = nn.Linear(H, NUM_ACTIONS)
+            def forward(self, x):
+                return self.head(self.res(self.embed(x)))
 
         self._net = _Net()
         self._net.load_state_dict(state_dict)
         self._net.eval()
         self._torch = torch
 
-    def get_probs(self, feats: np.ndarray, valid: list) -> dict:
+    def get_probs(self, feats: np.ndarray, valid: list,
+                  deterministic_threshold: float = 0.75) -> dict:
         with self._torch.no_grad():
             x      = self._torch.from_numpy(feats).unsqueeze(0)
             logits = self._net(x).squeeze(0)
             mask   = self._torch.full((NUM_ACTIONS,), float('-inf'))
             for a in valid: mask[a] = logits[a]
             probs  = self._torch.softmax(mask, 0).numpy()
-        return {a: float(probs[a]) for a in valid}
+        result = {a: float(probs[a]) for a in valid}
+        # Variance reduction: if one action dominates, play it deterministically
+        best_a = max(result, key=result.get)
+        if result[best_a] >= deterministic_threshold:
+            return {a: (1.0 if a == best_a else 0.0) for a in valid}
+        return result
 
 
 # ─── PlayerAgent ─────────────────────────────────────────────────────────────
