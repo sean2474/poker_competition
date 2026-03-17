@@ -38,15 +38,37 @@ def _regret_matching(adv_arr, valid_actions: list) -> dict:
     return {a: (1.0 if a == best_a else 0.0) for a in valid_actions}
 
 
+# Preflop 3-slot abstraction ─────────────────────────────────────────────
+# slot 0 = FOLD
+# slot 1 = CALL / CHECK  (never both valid at same node → safe to merge)
+# slot 2 = RAISE         (BET_SMALL or RAISE_SMALL, always fixed size)
+_PF_SLOTS = 3
+_PF_SLOT  = {0: 0, 1: 1, 2: 1, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2}
+#             F     C     K     bS    bL    rS    rL    bP
+
+
 def _tabular_strategy(regrets: np.ndarray, valid_actions: list) -> dict:
-    """CFR+ regret matching for tabular preflop regrets."""
-    pos = [max(float(regrets[a]), 0.0) for a in valid_actions]
-    total = sum(pos)
+    """CFR+ regret matching on 3-slot preflop abstraction."""
+    # Map each concrete action to its abstract slot
+    slot_to_actions: dict = {}
+    for a in valid_actions:
+        s = _PF_SLOT.get(a, 2)
+        slot_to_actions.setdefault(s, []).append(a)
+
+    pos   = [max(float(regrets[s]), 0.0) for s in range(_PF_SLOTS)]
+    total = sum(pos[s] for s in slot_to_actions)
     if total > 0:
-        inv = 1.0 / total
-        return {a: pos[i] * inv for i, a in enumerate(valid_actions)}
-    n = len(valid_actions)
-    return {a: 1.0 / n for a in valid_actions}
+        probs = {s: pos[s] / total for s in slot_to_actions}
+    else:
+        n = len(slot_to_actions)
+        probs = {s: 1.0 / n for s in slot_to_actions}
+
+    strategy = {}
+    for s, actions in slot_to_actions.items():
+        per = probs[s] / len(actions)
+        for a in actions:
+            strategy[a] = per
+    return strategy
 
 
 def _preflop_key(hand5, state) -> tuple:
@@ -111,16 +133,18 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
         ev = sum(strategy.get(a, 0) * action_values[a] for a in valid_actions)
 
         if cp == traversing_player:
-            # CFR+ regret update (clip negatives to 0)
-            r = trainer.preflop_regrets.setdefault(key, np.zeros(NUM_ACTIONS))
+            # CFR+ regret update on 3 abstract slots
+            r = trainer.preflop_regrets.setdefault(key, np.zeros(_PF_SLOTS))
             for a in valid_actions:
-                r[a] = max(0.0, r[a] + action_values[a] - ev)
+                slot = _PF_SLOT.get(a, 2)
+                r[slot] = max(0.0, r[slot] + action_values[a] - ev)
 
-        # Linear-weighted strategy accumulation (both players)
-        s = trainer.preflop_strategy_sum.setdefault(key, np.zeros(NUM_ACTIONS))
+        # Linear-weighted strategy accumulation (3 abstract slots)
+        s = trainer.preflop_strategy_sum.setdefault(key, np.zeros(_PF_SLOTS))
         t = float(trainer.iteration)
         for a in valid_actions:
-            s[a] += t * strategy.get(a, 0.0)
+            slot = _PF_SLOT.get(a, 2)
+            s[slot] += t * strategy.get(a, 0.0)
 
         return ev
 
