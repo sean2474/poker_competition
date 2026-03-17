@@ -15,7 +15,7 @@ MAX_BET    = 100
 SMALL_BLIND = 1
 BIG_BLIND   = 2
 FEATURE_DIM = 93
-NUM_ACTIONS = 7
+NUM_ACTIONS = 8
 
 # Deep CFR action IDs
 A_FOLD       = 0
@@ -25,6 +25,7 @@ A_BET_SMALL  = 3
 A_BET_LARGE  = 4
 A_RAISE_SMALL = 5
 A_RAISE_LARGE = 6
+A_BET_POT    = 7
 
 # Game action IDs
 _FOLD    = 0
@@ -352,6 +353,7 @@ class PlayerAgent(Agent):
             if can_raise:
                 cfr_valid.append(A_BET_SMALL)
                 cfr_valid.append(A_BET_LARGE)
+                cfr_valid.append(A_BET_POT)
 
         return cfr_valid if cfr_valid else [A_CHECK if valid[_CHECK] else A_CALL]
 
@@ -369,6 +371,10 @@ class PlayerAgent(Agent):
             return (_CHECK, 0, 0, 0)
         elif cfr_action in (A_BET_SMALL, A_RAISE_SMALL):
             amt = max(min_r, min(min_r + int(spread * 0.25), max_r))
+            return (_RAISE, amt, 0, 0)
+        elif cfr_action == A_BET_POT:
+            pot = obs["my_bet"] + obs["opp_bet"]
+            amt = max(min_r, min(pot, max_r))
             return (_RAISE, amt, 0, 0)
         else:  # BET_LARGE / RAISE_LARGE
             amt = max(min_r, min(min_r + int(spread * 0.70), max_r))

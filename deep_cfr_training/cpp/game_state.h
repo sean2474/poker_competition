@@ -16,7 +16,7 @@ constexpr int BIG_BLIND = 2;
 constexpr int NUM_RANKS = 9;   // 2-9,A
 constexpr int NUM_SUITS = 3;   // d,h,s
 constexpr int DECK_SIZE = 27;
-constexpr int NUM_ACTIONS = 7;
+constexpr int NUM_ACTIONS = 8;
 constexpr int FEATURE_DIM = 85;
 
 // Actions
@@ -27,6 +27,7 @@ constexpr int A_BET_SMALL = 3;
 constexpr int A_BET_LARGE = 4;
 constexpr int A_RAISE_SMALL = 5;
 constexpr int A_RAISE_LARGE = 6;
+constexpr int A_BET_POT = 7;
 
 inline int card_rank(int c) { return c % NUM_RANKS; }
 inline int card_suit(int c) { return c / NUM_RANKS; }
@@ -65,6 +66,7 @@ struct GameState {
             if (can_raise) {
                 actions[n++] = A_BET_SMALL;
                 actions[n++] = A_BET_LARGE;
+                actions[n++] = A_BET_POT;
             }
         }
     }
@@ -107,9 +109,12 @@ struct GameState {
         s.num_actions_this_street++;
         if (st < 4) s.street_bets[st][cp]++;
         int spread = max_raise - s.min_raise;
+        int pot = s.bets[0] + s.bets[1];
         int raise_amt;
         if (action == A_BET_SMALL || action == A_RAISE_SMALL) {
             raise_amt = s.min_raise + spread / 4;
+        } else if (action == A_BET_POT) {
+            raise_amt = std::max(s.min_raise, std::min(pot, max_raise));
         } else {
             raise_amt = s.min_raise + spread * 7 / 10;
         }

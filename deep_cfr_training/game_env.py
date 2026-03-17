@@ -21,7 +21,8 @@ A_BET_SMALL = 3
 A_BET_LARGE = 4
 A_RAISE_SMALL = 5
 A_RAISE_LARGE = 6
-NUM_ACTIONS = 7
+A_BET_POT = 7
+NUM_ACTIONS = 8
 FEATURE_DIM = 93  # 85 + 8 betting history
 
 
@@ -188,6 +189,7 @@ class GameState:
             if can_raise:
                 actions.append(A_BET_SMALL)
                 actions.append(A_BET_LARGE)
+                actions.append(A_BET_POT)
         return actions
     
     def apply(self, action):
@@ -226,8 +228,11 @@ class GameState:
         s.num_actions_this_street += 1
         s.street_bets[s.street][cp] += 1
         spread = max_raise - s.min_raise
+        pot = s.bets[0] + s.bets[1]
         if action in (A_BET_SMALL, A_RAISE_SMALL):
             raise_amt = s.min_raise + int(spread * 0.25)
+        elif action == A_BET_POT:
+            raise_amt = max(s.min_raise, min(pot, max_raise))
         else:
             raise_amt = s.min_raise + int(spread * 0.70)
         
