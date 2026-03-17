@@ -52,7 +52,7 @@ def train_adv_networks(trainer) -> list:
     return losses
 
 
-_GPU_LOAD_CAP = 524_288    # 512K — limits randperm N and GPU memory pressure
+_GPU_LOAD_CAP = 1_048_576  # 1M — balances coverage (33% of 3M buf) vs randperm speed
 _PROFILE      = False      # flip True to print per-phase ms once for debugging
 
 
