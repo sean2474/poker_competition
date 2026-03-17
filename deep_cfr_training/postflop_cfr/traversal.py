@@ -163,6 +163,8 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
         state.street, is_bb, my_disc, opp_disc,
         hero_hand5=None,
         street_bets=state.street_bets,
+        history=state.history,
+        num_actions_this_street=state.num_actions_this_street,
     )
 
     strategy = yield (features, valid_actions, cp, state.street)
