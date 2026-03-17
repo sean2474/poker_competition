@@ -178,7 +178,7 @@ void c_fast_discard(const int* hand5, const int* board3, int* ki, int* kj, unsig
     fast_discard(hand5, board3, *ki, *kj, rng, temperature);
 }
 
-// Compute features for a game state
+// Compute features for a game state (outputs full 119-dim vector)
 void c_state_features(
     const int* hero_hand2, const int* hero_hand5,
     const int* community, int n_comm,
@@ -186,7 +186,13 @@ void c_state_features(
     const int* my_disc, const int* opp_disc,
     int use_hand5,
     float* features_out,
-    const int* street_bets_flat  // 8 ints: [s0p0, s0p1, s1p0, s1p1, ...] or null
+    const int* street_bets_flat,          // 8 ints [s0p0,s0p1,...] or null
+    const float* street_last_ratios_flat, // 8 floats [s0p0,s0p1,...] or null
+    const int*   street_bet_counts_flat,  // 8 ints  [s0p0,s0p1,...] or null
+    const int*   history_players,         // [history_len] or null
+    const int*   history_actions,         // [history_len] or null
+    int          history_len,
+    int          num_acts_this_street
 ) {
     int sb[4][2] = {};
     if (street_bets_flat) {
@@ -198,7 +204,11 @@ void c_state_features(
     state_to_features(hero_hand2, hero_hand5, community, n_comm,
                        my_bet, opp_bet, street, (bool)is_bb,
                        my_disc, opp_disc, (bool)use_hand5, features_out,
-                       street_bets_flat ? sb : nullptr);
+                       street_bets_flat ? sb : nullptr,
+                       street_last_ratios_flat,
+                       street_bet_counts_flat,
+                       history_players, history_actions,
+                       history_len, num_acts_this_street);
 }
 
 // Evaluate showdown: returns +1 p0 wins, -1 p1 wins, 0 tie

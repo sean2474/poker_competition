@@ -17,7 +17,8 @@ constexpr int NUM_RANKS = 9;   // 2-9,A
 constexpr int NUM_SUITS = 3;   // d,h,s
 constexpr int DECK_SIZE = 27;
 constexpr int NUM_ACTIONS = 8;
-constexpr int FEATURE_DIM = 85;
+constexpr int FEATURE_DIM = 119;   // 93 base (C++) + 26 extra
+constexpr int BASE_FEATURE_DIM = 93;
 
 // Actions
 constexpr int A_FOLD = 0;
@@ -306,7 +307,7 @@ inline void opp_range_features(const int* opp_disc, const int* community, int n_
     out[5] = 1.0f - avg;
 }
 
-// Build full 93-dim feature vector (85 + 8 betting history)
+// Build full 119-dim feature vector
 // Permutation invariant: hero hand and flop cards are sorted before encoding
 inline void state_to_features(
     const int* hero_hand2, const int* hero_hand5,
@@ -315,8 +316,16 @@ inline void state_to_features(
     const int* my_disc, const int* opp_disc,
     bool use_hand5,
     float* features,
-    const int street_bets[4][2] = nullptr  // [street][player] bet count
+    const int street_bets[4][2] = nullptr,        // [street][player] max chip raise (fallback)
+    const float* street_last_ratios = nullptr,     // [4][2] flat: LAST bet/pot per street/player
+    const int*   street_bet_counts  = nullptr,     // [4][2] flat: raise count per street/player
+    const int*   history_players    = nullptr,     // [history_len]
+    const int*   history_actions    = nullptr,     // [history_len]
+    int          history_len        = 0,
+    int          num_acts_this_street = 0
 ) {
+    // Zero-init entire 119-dim buffer
+    for (int i = 0; i < FEATURE_DIM; i++) features[i] = 0.0f;
     int idx = 0;
 
     // Hero hand (20 floats) — sorted for permutation invariance
@@ -420,13 +429,20 @@ inline void state_to_features(
     }
     idx += 6;
 
-    // Betting history (8): per-street max raise amount for hero + opp
-    // Normalized by MAX_BET — captures SIZING not just frequency
+    // Betting history (8): LAST bet/pot ratio per player per street
+    // Overridden by street_last_ratios if provided, else falls back to /MAX_BET
     for (int s = 0; s < 4; s++) {
-        float my_bets = street_bets ? (float)street_bets[s][is_bb ? 1 : 0] / (float)MAX_BET : 0.0f;
-        float op_bets = street_bets ? (float)street_bets[s][is_bb ? 0 : 1] / (float)MAX_BET : 0.0f;
-        features[idx++] = std::min(my_bets, 1.0f);
-        features[idx++] = std::min(op_bets, 1.0f);
+        int hp = is_bb ? 1 : 0;
+        float my_r = 0.0f, op_r = 0.0f;
+        if (street_last_ratios) {
+            my_r = std::min(street_last_ratios[s*2 + hp],     4.0f);
+            op_r = std::min(street_last_ratios[s*2 + 1 - hp], 4.0f);
+        } else if (street_bets) {
+            my_r = std::min((float)street_bets[s][hp]     / (float)MAX_BET, 1.0f);
+            op_r = std::min((float)street_bets[s][1 - hp] / (float)MAX_BET, 1.0f);
+        }
+        features[idx++] = my_r;
+        features[idx++] = op_r;
     }
 
     // Opp range (6)
@@ -434,8 +450,97 @@ inline void state_to_features(
     if (opp_disc) { opp_d[0] = opp_disc[0]; opp_d[1] = opp_disc[1]; opp_d[2] = opp_disc[2]; }
     opp_range_features(opp_d, vis_comm, vis_n, &features[idx]);
     idx += 6;
+    // idx == 93
 
-    // idx should be 85
+    // ── Extra 26 dims ─────────────────────────────────────────────────────
+    int hp = is_bb ? 1 : 0;
+    int to_call = std::max(opp_bet - my_bet, 0);
+
+    // [93-94] Initiative: hero/villain last aggressor
+    if (history_players && history_actions && history_len > 0) {
+        for (int i = history_len - 1; i >= 0; i--) {
+            int act = history_actions[i];
+            if (act >= 3) {  // aggressive action
+                features[idx]     = (history_players[i] == hp) ? 1.0f : 0.0f;
+                features[idx + 1] = (history_players[i] != hp) ? 1.0f : 0.0f;
+                break;
+            }
+        }
+    }
+    idx += 2;
+
+    // [95-96] Action context
+    features[idx++] = (to_call > 0) ? 1.0f : 0.0f;
+    features[idx++] = (to_call == 0) ? 1.0f : 0.0f;
+
+    // [97-100] Line class
+    {
+        int bets_this = 0;
+        int start = history_len - num_acts_this_street;
+        if (start < 0) start = 0;
+        if (history_actions) {
+            for (int i = start; i < history_len; i++)
+                if (history_actions[i] >= 3) bets_this++;
+        }
+        if      (to_call == 0 && bets_this == 0) features[idx]   = 1.0f;  // checked_to
+        else if (to_call > 0  && bets_this == 1) features[idx+1] = 1.0f;  // facing_lead
+        else if (to_call > 0  && bets_this >= 2) features[idx+2] = 1.0f;  // facing_raise
+        else if (to_call == 0 && bets_this >= 1) features[idx+3] = 1.0f;  // raised_pot
+        idx += 4;
+    }
+
+    // [101-105] Board texture
+    {
+        int board_r[5], board_s[5];
+        int sc[3] = {};
+        bool paired = false;
+        bool seen_r[9] = {};
+        int min_r2 = 8, max_r2 = 0;
+        for (int i = 0; i < n_comm; i++) {
+            int c = community[i];
+            if (c < 0) continue;
+            int r = card_rank(c), s = card_suit(c);
+            board_r[i] = r; board_s[i] = s;
+            sc[s]++;
+            if (seen_r[r]) paired = true;
+            seen_r[r] = true;
+            min_r2 = std::min(min_r2, r); max_r2 = std::max(max_r2, r);
+        }
+        int max_sc = *std::max_element(sc, sc+3);
+        features[idx]   = paired ? 1.0f : 0.0f;
+        features[idx+1] = (n_comm >= 3 && max_sc == n_comm) ? 1.0f : 0.0f;  // monotone
+        features[idx+2] = (max_sc >= 2) ? 1.0f : 0.0f;                      // two-suited
+        if (n_comm >= 3) features[idx+3] = ((max_r2 - min_r2) <= 4) ? 1.0f : 0.0f; // connected
+        if (n_comm >= 4) {  // scare card
+            int prev_sc[3] = {};
+            for (int i = 0; i < n_comm-1; i++) prev_sc[board_s[i]]++;
+            if (prev_sc[board_s[n_comm-1]] >= 2) features[idx+4] = 1.0f;
+        }
+        idx += 5;
+    }
+
+    // [106-110] Bet ratios (pot-relative)
+    {
+        int pot = my_bet + opp_bet;
+        float sp = std::max((float)pot, 1.0f);
+        int max_r2 = std::max(MAX_BET - std::max(my_bet, opp_bet), 0);
+        features[idx++] = std::min((float)to_call  / sp, 4.0f);
+        features[idx++] = std::min((float)opp_bet   / sp, 4.0f);
+        features[idx++] = std::min((float)my_bet    / sp, 4.0f);
+        features[idx++] = std::min((float)max_r2    / sp, 4.0f);
+        features[idx++] = max_r2 / 100.0f;
+    }
+
+    // [111-118] Bet counts per player per street
+    if (street_bet_counts) {
+        for (int s = 0; s < 4; s++) {
+            features[idx++] = std::min(street_bet_counts[s*2 + hp]     / 4.0f, 1.0f);
+            features[idx++] = std::min(street_bet_counts[s*2 + 1 - hp] / 4.0f, 1.0f);
+        }
+    } else {
+        for (int i = 0; i < 8; i++) features[idx++] = 0.0f;
+    }
+    // idx == 119
 }
 
 // ═══════════════════════════════════════════════

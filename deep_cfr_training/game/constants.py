@@ -13,5 +13,4 @@ A_RAISE_SMALL = 5  # postflop: 33% pot
 A_RAISE_LARGE = 6  # postflop: 75% pot
 
 NUM_ACTIONS     = 8
-CPP_FEATURE_DIM = 93   # C++ c_state_features output size
-FEATURE_DIM     = 119  # total: 93 C++ + 26 Python (initiative/context/line/texture/ratios/bet-counts)
+FEATURE_DIM = 119  # C++ c_state_features outputs all 119 dims directly

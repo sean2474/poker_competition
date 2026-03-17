@@ -13,10 +13,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from game.features import state_to_features
 from game.constants import (
-    FEATURE_DIM, CPP_FEATURE_DIM,
+    FEATURE_DIM,
     A_FOLD, A_CALL, A_CHECK, A_BET_SMALL, A_BET_LARGE,
     A_RAISE_SMALL, A_RAISE_LARGE, A_BET_POT,
 )
+
+CPP_FEATURE_DIM = 93   # base dims before extra 26 (extra now computed in C++)
 
 # Deck helpers: card = rank + suit*9, ranks 0-8, suits 0-2
 def c(rank, suit=0): return rank + suit * 9
