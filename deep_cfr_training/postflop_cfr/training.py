@@ -54,20 +54,27 @@ def train_adv_networks(trainer) -> list:
 
 def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):
     import torch.optim.lr_scheduler as sched
+    # Load entire buffer to GPU once — eliminates per-batch CPU sampling overhead
+    n_load = max(batch_size * num_batches, len(buf))
+    data = buf.sample_streets(streets, n_load)
+    if data is None:
+        return 0.0
+    features, values, iterations, masks = data
+    weights = (2.0 * iterations / max(total_iters, 1)).astype('float32')
+
+    import numpy as _np
+    x_all = _to_device(features, device)
+    y_all = _to_device(values,   device)
+    w_all = _to_device(weights,  device)
+    m_all = _to_device(masks,    device)
+    N = x_all.shape[0]
+
     scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
     total_loss = 0.0
+    bs = min(batch_size, N)
     for _ in range(num_batches):
-        data = buf.sample_streets(streets, batch_size)
-        if data is None:
-            scheduler.step(); continue
-        features, values, iterations, masks = data
-        weights = 2.0 * iterations / max(total_iters, 1)
-
-        x = _to_device(features, device)
-        y = _to_device(values,   device)
-        w = _to_device(weights,  device)
-        m = _to_device(masks,    device)
-
+        idx = torch.randperm(N, device=device)[:bs]
+        x = x_all[idx]; y = y_all[idx]; w = w_all[idx]; m = m_all[idx]
         pred  = net(x)
         loss  = ((pred - y) ** 2 * w.unsqueeze(1) * m).sum() / (m.sum() + 1e-8)
         opt.zero_grad(); loss.backward()
@@ -75,6 +82,7 @@ def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters,
         opt.step(); scheduler.step()
         total_loss += loss.item()
 
+    del x_all, y_all, w_all, m_all
     return total_loss / num_batches
 
 
@@ -82,7 +90,7 @@ def train_strategy_nets(trainer, num_batches: int = None):
     """Train postflop strategy net. Preflop = tabular chart (no net needed)."""
     device  = trainer.device
     bs      = trainer.batch_size
-    n_batch = num_batches or trainer.num_batches * 3
+    n_batch = num_batches or trainer.num_batches
     buf     = trainer.strategy_buffer
 
     postflop_has_data = any(buf.street_bufs[s] for s in [1, 2, 3])
@@ -96,18 +104,26 @@ def train_strategy_nets(trainer, num_batches: int = None):
 
 def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):
     import torch.optim.lr_scheduler as sched
+    # Load entire buffer to GPU once
+    n_load = max(batch_size * num_batches, len(buf))
+    data = buf.sample_streets(streets, n_load)
+    if data is None:
+        return 0.0
+    features, strategies, iterations, masks = data
+    weights = (2.0 * iterations / max(total_iters, 1)).astype('float32')
+
+    x_all = _to_device(features,   device)
+    y_all = _to_device(strategies, device)
+    w_all = _to_device(weights,    device)
+    m_all = _to_device(masks,      device)
+    N = x_all.shape[0]
+
     scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
     total_loss = 0.0
+    bs = min(batch_size, N)
     for b in range(num_batches):
-        data = buf.sample_streets(streets, batch_size)
-        if data is None:
-            scheduler.step(); continue
-        features, strategies, iterations, masks = data
-        x = _to_device(features,   device)
-        y = _to_device(strategies, device)
-        w = _to_device(2.0 * iterations / max(total_iters, 1), device)
-        m = _to_device(masks,      device)
-
+        idx = torch.randperm(N, device=device)[:bs]
+        x = x_all[idx]; y = y_all[idx]; w = w_all[idx]; m = m_all[idx]
         logits    = net(x)
         log_probs = torch.log_softmax(logits, dim=1)
         loss      = -(y * log_probs * m * w.unsqueeze(1)).sum() / (m.sum() + 1e-8)
@@ -116,7 +132,5 @@ def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_i
         opt.step(); scheduler.step()
         total_loss += loss.item()
 
-        if (b + 1) % 100 == 0:
-            print(f"  strategy [{streets}] batch {b+1}/{num_batches} loss={total_loss/(b+1):.4f}")
-
+    del x_all, y_all, w_all, m_all
     return total_loss / num_batches
