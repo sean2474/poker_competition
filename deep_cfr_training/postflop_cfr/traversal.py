@@ -20,7 +20,17 @@ from game.constants import NUM_ACTIONS, BIG_BLIND
 from preflop_cfr.canonical import canonicalize
 from preflop_cfr.equity   import warmup_ev
 
-WARMUP_ITERS = 50  # use equity approximation until postflop net is meaningful
+WARMUP_ITERS       = 50    # hard fallback (if buffer never fills for some reason)
+MIN_WARMUP_SAMPLES = 2000  # per street per player before switching to neural net
+
+
+def _postflop_ready(trainer) -> bool:
+    """Switch from warmup equity to neural net when buffer is sufficiently warm."""
+    for p in range(2):
+        for s in [1, 2, 3]:
+            if len(trainer.adv_buffers[p].street_bufs[s]) < MIN_WARMUP_SAMPLES:
+                return False
+    return True
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -168,10 +178,10 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
         return ev
 
     # ── POSTFLOP: warmup OR neural network ───────────────────────────────
-    # During warmup: equity-based EV (postflop net is too noisy to trust)
-    if getattr(trainer, 'iteration', 1) <= getattr(trainer, 'warmup_iters', WARMUP_ITERS):
-        eq_ev = warmup_ev(p0_hand5, p1_hand5, state, traversing_player)
-        return eq_ev
+    # Use equity approximation until buffer is warm enough OR hard iter limit
+    _iter_limit = getattr(trainer, 'warmup_iters', WARMUP_ITERS)
+    if not _postflop_ready(trainer) and getattr(trainer, 'iteration', 1) <= _iter_limit:
+        return warmup_ev(p0_hand5, p1_hand5, state, traversing_player)
 
     vis_comm = ([], community[:3], community[:4], community[:5])[min(state.street, 3)]
     features = state_to_features(
