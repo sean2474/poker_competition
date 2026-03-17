@@ -46,8 +46,7 @@ def train_adv_networks(trainer) -> list:
             opt = optim.Adam(trainer.adv_nets[p].parameters(), lr=trainer.lr)
             loss = _train_adv_net(trainer.adv_nets[p], opt, buf, [1, 2, 3],
                                   bs, n_batch, trainer.total_iterations, device)
-            trainer.adv_nets[p] = trainer.adv_nets[p].cpu()
-            losses[p] = loss
+            losses[p] = loss  # keep on GPU for traversal inference
 
     return losses
 
@@ -150,7 +149,6 @@ def train_strategy_nets(trainer, num_batches: int = None):
         opt = optim.Adam(trainer.strategy_net.parameters(), lr=trainer.lr)
         _train_strategy_net(trainer.strategy_net, opt, buf, [1, 2, 3],
                             bs, n_batch, trainer.total_iterations, device)
-        trainer.strategy_net = trainer.strategy_net.cpu()
 
 
 def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):

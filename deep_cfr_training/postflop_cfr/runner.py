@@ -178,6 +178,11 @@ def load_checkpoint(trainer, path) -> int:
             pf = pickle.load(f)
         trainer.preflop_regrets      = pf.get('regrets', {})
         trainer.preflop_strategy_sum = pf.get('strategy_sum', {})
+    # Move networks to training device (checkpoint loaded with map_location='cpu')
+    device = trainer.device
+    for net in trainer.adv_nets:
+        net.to(device)
+    trainer.strategy_net.to(device)
     # Restore buffers if saved
     _load_buffer(trainer.adv_buffers[0],  path + '.buf_adv0')
     _load_buffer(trainer.adv_buffers[1],  path + '.buf_adv1')

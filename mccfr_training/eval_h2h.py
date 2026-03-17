@@ -16,7 +16,7 @@ import logging
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "submission"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "submission_mccfr"))
 
 from gym_env import PokerEnv
 from abstractions.discard_oracle import choose_discard
@@ -138,7 +138,7 @@ def _mc_choose_discard(hand_5, board_3, opp_discards=None, top_k=3, mc_sims=150)
 class SimpleAgent:
     """Lightweight agent that plays using a specific strategy table."""
 
-    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None, use_exact_discard=True, use_subgame_sizing=False, use_safe_subgame=False, conf_threshold=300000000.0):
+    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None, use_exact_discard=True, use_subgame_sizing=False, use_safe_subgame=False, conf_threshold=300000000.0, fallback_only=False):
         self.name = name
         self.key_to_idx = key_to_idx
         self.probs = probs
@@ -149,6 +149,7 @@ class SimpleAgent:
         self.use_subgame_sizing = use_subgame_sizing
         self.use_safe_subgame = use_safe_subgame
         self.conf_threshold = conf_threshold
+        self.fallback_only = fallback_only
         self.reset()
 
     def reset(self):
@@ -430,6 +431,9 @@ class SimpleAgent:
             self.my_discards = [my_cards[k] for k in range(5) if k != ki and k != kj]
             return (_DISCARD, 0, ki, kj)
 
+        if self.fallback_only:
+            return self._clamp(self._fallback_action(obs), obs)
+
         cfr_result = self._cfr_action(obs)
         cfr_action, conf = cfr_result[0], cfr_result[1]
 
@@ -545,6 +549,7 @@ def main():
     parser.add_argument("--self-compare", action="store_true", help="Compare exact vs MC discard on same checkpoint")
     parser.add_argument("--subgame-compare", action="store_true", help="Compare with vs without sizing subgame")
     parser.add_argument("--safe-subgame-compare", action="store_true", help="Compare safe subgame vs no subgame")
+    parser.add_argument("--fallback-compare", action="store_true", help="Compare CFR vs fallback-only on same checkpoint")
     parser.add_argument("--parallel", type=int, default=1, help="Number of parallel matches")
     args = parser.parse_args()
 
@@ -554,6 +559,22 @@ def main():
     kA, pA, atA, alA, cA, iA, nA = convert_bin(args.bin_a)
     thA = compute_confidence_threshold(cA)
     print(f"  → {iA:,} iters, {nA:,} nodes, conf={'YES' if cA is not None else 'NO'}, threshold={thA:.0f}")
+
+    if args.fallback_compare:
+        nameA = "cfr"
+        nameB = "fallback"
+        print(f"\n=== CFR vs Fallback-only ({args.matches} matches) ===")
+        winsA = winsB = 0
+        for m in range(args.matches):
+            agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA, conf_threshold=thA, fallback_only=False)
+            agentB = SimpleAgent(nameB, kA, pA, atA, alA, cA, conf_threshold=thA, fallback_only=True)
+            reward = run_match(agentA, agentB, num_hands=1000)
+            winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
+            if reward > 0: winsA += 1
+            elif reward < 0: winsB += 1
+            print(f"  Match {m+1}: {winner} wins ({reward:+d})")
+        print(f"\nResult: cfr={winsA}W  fallback={winsB}W  TIE={args.matches-winsA-winsB}")
+        return
 
     if args.safe_subgame_compare:
         nameA = "safe_subgame"

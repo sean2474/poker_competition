@@ -261,16 +261,18 @@ def _neural_round(trainer, gens, pending, tp):
         batch.init_one(j, state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d, tp)
 
     # GPU inference loop (all n games advance together)
+    device = trainer.device
+    nets   = trainer.adv_nets
     while batch.n_pending() > 0:
         cnt, feats, valid, n_valid, players, game_idxs = batch.collect_pending()
         if cnt == 0: break
         strategies = np.zeros((cnt, NUM_ACTIONS), dtype=np.float32)
+        f_t = torch.from_numpy(feats[:cnt]).to(device, non_blocking=True)
         for p in [0, 1]:
             pidx = np.where(players[:cnt] == p)[0]
             if len(pidx) == 0: continue
-            x = torch.tensor(feats[pidx], dtype=torch.float32)
             with torch.no_grad():
-                adv = trainer.adv_nets[p](x).numpy()
+                adv = nets[p](f_t[pidx]).cpu().numpy()
             for k2, gi in enumerate(pidx):
                 strategies[gi] = adv[k2]
         batch.resume(game_idxs[:cnt].copy(), strategies[:cnt])

@@ -15,6 +15,7 @@ import os
 def load_checkpoint(path):
     """Load checkpoint: returns (iterations, nodes_dict)
     nodes_dict: key -> (num_actions, action_type, regret_sum[4], strategy_sum[4])
+    Supports both old format (74 bytes/node) and new format (90 bytes/node with cfv fields).
     """
     with open(path, 'rb') as f:
         data = f.read()
@@ -22,13 +23,21 @@ def load_checkpoint(path):
     offset = 0
     iters, num_nodes = struct.unpack_from('<II', data, offset); offset += 8
     
+    # Detect format: old=74 bytes/node (no cfv), new=90 bytes/node (with cfv_sum+cfv_count)
+    data_size = len(data) - 8
+    per_node = data_size // num_nodes if num_nodes > 0 else 74
+    has_cfv = (per_node >= 88)
+    
     nodes = {}
     for i in range(num_nodes):
         key = struct.unpack_from('<Q', data, offset)[0]; offset += 8
         atype = struct.unpack_from('<B', data, offset)[0]; offset += 1
         nact = struct.unpack_from('<B', data, offset)[0]; offset += 1
+        nact = min(nact, 4)  # safety cap
         regret = list(struct.unpack_from('<4d', data, offset)); offset += 32
         strat = list(struct.unpack_from('<4d', data, offset)); offset += 32
+        if has_cfv:
+            offset += 16  # skip cfv_sum + cfv_count
         nodes[key] = {
             'nact': nact,
             'atype': atype,
@@ -87,6 +96,9 @@ def save_strategy_bin(path, iterations, nodes):
             f.write(struct.pack('<B', node['nact']))
             # Average strategy
             nact = node['nact']
+            if nact == 0:
+                nact = 1
+                node = dict(node); node['nact'] = 1
             strat = node['strat'][:nact]
             total = sum(strat)
             if total > 0:
@@ -137,9 +149,9 @@ def main():
     print(f"  Saved checkpoint: {ckpt_path}")
     
     # Save strategy binary
-    strat_path = output.replace('checkpoint', 'strategy').replace('.bin', '_cpp.bin')
+    strat_path = output.replace('checkpoint_cpp.bin', 'strategy_cpp.bin')
     if strat_path == output:
-        strat_path = output.rsplit('.', 1)[0] + '_strategy.bin'
+        strat_path = output.rsplit('.', 1)[0] + '_strategy_cpp.bin'
     save_strategy_bin(strat_path, total_iters, merged)
     print(f"  Saved strategy: {strat_path}")
     

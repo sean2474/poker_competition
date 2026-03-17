@@ -46,11 +46,9 @@ class DeepCFR:
         self.lr     = lr
         self.device = DEVICE
 
-        # Postflop advantage nets (CPU during traversal, GPU during training)
-        self.adv_nets    = [PostflopAdvantageNet() for _ in range(2)]
-
-        # Postflop average strategy net
-        self.strategy_net = PostflopStrategyNet()
+        # Postflop advantage/strategy nets — kept on device at all times
+        self.adv_nets    = [PostflopAdvantageNet().to(DEVICE) for _ in range(2)]
+        self.strategy_net = PostflopStrategyNet().to(DEVICE)
 
         # Preflop tabular CFR tables
         # key: (canonical_hand_tuple, history_str)  value: np.array(NUM_ACTIONS)
