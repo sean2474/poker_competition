@@ -86,7 +86,11 @@ def convert_bin(bin_path):
     return key_to_idx, probs, act_types, ACTION_LISTS, confidence, iters, nodes
 
 
-CONFIDENCE_THRESHOLD = 300000000.0
+def compute_confidence_threshold(confidence):
+    """Use median confidence as threshold → ~50% CFR usage."""
+    if confidence is None or len(confidence) == 0:
+        return 300000000.0
+    return float(np.median(confidence))
 
 
 def _mc_choose_discard(hand_5, board_3, opp_discards=None, top_k=3, mc_sims=150):
@@ -134,7 +138,7 @@ def _mc_choose_discard(hand_5, board_3, opp_discards=None, top_k=3, mc_sims=150)
 class SimpleAgent:
     """Lightweight agent that plays using a specific strategy table."""
 
-    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None, use_exact_discard=True, use_subgame_sizing=False):
+    def __init__(self, name, key_to_idx, probs, act_types, action_lists, confidence=None, use_exact_discard=True, use_subgame_sizing=False, use_safe_subgame=False, conf_threshold=300000000.0):
         self.name = name
         self.key_to_idx = key_to_idx
         self.probs = probs
@@ -143,6 +147,8 @@ class SimpleAgent:
         self.confidence = confidence
         self.use_exact_discard = use_exact_discard
         self.use_subgame_sizing = use_subgame_sizing
+        self.use_safe_subgame = use_safe_subgame
+        self.conf_threshold = conf_threshold
         self.reset()
 
     def reset(self):
@@ -220,7 +226,7 @@ class SimpleAgent:
         # Confidence
         conf = 0.0
         if self.confidence is not None and idx < len(self.confidence):
-            conf = min(float(self.confidence[idx]) / CONFIDENCE_THRESHOLD, 1.0)
+            conf = min(float(self.confidence[idx]) / self.conf_threshold, 1.0)
 
         raw_probs = self.probs[idx, :n].astype(np.float32)
         total = raw_probs.sum()
@@ -447,6 +453,34 @@ class SimpleAgent:
                     self.villain_last_raiser = False
                 return self._clamp(cfr_action, obs)
 
+        # Try safe subgame if enabled and post-flop
+        if self.use_safe_subgame and self.my_hand_2 and len([c for c in obs.get('community_cards',[]) if c != -1]) >= 3:
+            try:
+                from abstractions.safe_subgame import safe_subgame_solve, compute_blueprint_cfv
+                from itertools import combinations as _combs
+                community = [c for c in obs['community_cards'] if c != -1]
+                dead_set = set(self.my_hand_2) | set(community)
+                for c in self.my_discards:
+                    if c >= 0: dead_set.add(c)
+                for c in self.opp_discards:
+                    if c >= 0: dead_set.add(c)
+                rem = [c for c in ALL_CARDS if c not in dead_set]
+                opp_hands = list(_combs(rem, 2))[:30]
+                opp_reach = [1.0/len(opp_hands)] * len(opp_hands)
+                my_bet = int(obs['my_bet']); opp_bet = int(obs['opp_bet'])
+                cfvs = compute_blueprint_cfv(self.my_hand_2, community, opp_hands, opp_reach, my_bet, opp_bet, None)
+                act, amt = safe_subgame_solve(
+                    self.my_hand_2, community, my_bet, opp_bet,
+                    int(obs['min_raise']), int(obs['max_raise']),
+                    obs['valid_actions'], opp_hands, opp_reach, cfvs, num_iters=100)
+                if act is not None:
+                    name_map = {0:'FOLD',1:'RAISE',2:'CHECK',3:'CALL'}
+                    n = name_map.get(act, 'CHECK')
+                    self.street_history += {'FOLD':'F','CHECK':'K','CALL':'C','RAISE':'R'}.get(n,'K')
+                    if act == 1: self.hero_last_raiser = True
+                    return self._clamp((act, amt, 0, 0), obs)
+            except Exception:
+                pass
         return self._clamp(self._fallback_action(obs), obs)
 
     def observe_opp(self, opp_action):
@@ -494,6 +528,15 @@ def run_match(agent0, agent1, num_hands=1000):
     return total_reward
 
 
+def _run_one_match(args):
+    """Worker for parallel matches."""
+    nameA, kA, pA, atA, alA, cA, thA, nameB, kB, pB, atB, alB, cB, thB, match_idx = args
+    agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA, conf_threshold=thA)
+    agentB = SimpleAgent(nameB, kB, pB, atB, alB, cB, conf_threshold=thB)
+    reward = run_match(agentA, agentB, num_hands=1000)
+    return match_idx, reward
+
+
 def main():
     parser = argparse.ArgumentParser(description="Head-to-head checkpoint evaluation")
     parser.add_argument("bin_a", help="First checkpoint binary")
@@ -501,13 +544,32 @@ def main():
     parser.add_argument("--matches", type=int, default=5)
     parser.add_argument("--self-compare", action="store_true", help="Compare exact vs MC discard on same checkpoint")
     parser.add_argument("--subgame-compare", action="store_true", help="Compare with vs without sizing subgame")
+    parser.add_argument("--safe-subgame-compare", action="store_true", help="Compare safe subgame vs no subgame")
+    parser.add_argument("--parallel", type=int, default=1, help="Number of parallel matches")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
 
     print(f"Loading {args.bin_a}...")
     kA, pA, atA, alA, cA, iA, nA = convert_bin(args.bin_a)
-    print(f"  → {iA:,} iters, {nA:,} nodes, conf={'YES' if cA is not None else 'NO'}")
+    thA = compute_confidence_threshold(cA)
+    print(f"  → {iA:,} iters, {nA:,} nodes, conf={'YES' if cA is not None else 'NO'}, threshold={thA:.0f}")
+
+    if args.safe_subgame_compare:
+        nameA = "safe_subgame"
+        nameB = "no_subgame"
+        print(f"\n=== Safe subgame vs no subgame ({args.matches} matches) ===")
+        winsA = winsB = 0
+        for m in range(args.matches):
+            agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA, use_safe_subgame=True)
+            agentB = SimpleAgent(nameB, kA, pA, atA, alA, cA, use_safe_subgame=False)
+            reward = run_match(agentA, agentB, num_hands=1000)
+            winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
+            if reward > 0: winsA += 1
+            elif reward < 0: winsB += 1
+            print(f"  Match {m+1}: {winner} wins ({reward:+d})")
+        print(f"\nResult: safe_subgame={winsA}W  no_subgame={winsB}W  TIE={args.matches-winsA-winsB}")
+        return
 
     if args.subgame_compare:
         nameA = "subgame"
@@ -549,23 +611,35 @@ def main():
 
     print(f"Loading {args.bin_b}...")
     kB, pB, atB, alB, cB, iB, nB = convert_bin(args.bin_b)
-    print(f"  → {iB:,} iters, {nB:,} nodes, conf={'YES' if cB is not None else 'NO'}")
+    thB = compute_confidence_threshold(cB)
+    print(f"  → {iB:,} iters, {nB:,} nodes, conf={'YES' if cB is not None else 'NO'}, threshold={thB:.0f}")
 
     nameA = f"{iA//1000}k"
     nameB = f"{iB//1000}k"
 
     winsA = winsB = 0
-    print(f"\n=== {nameA} vs {nameB} ({args.matches} matches) ===")
+    print(f"\n=== {nameA} vs {nameB} ({args.matches} matches, {args.parallel} parallel) ===")
 
-    for m in range(args.matches):
-        agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA)
-        agentB = SimpleAgent(nameB, kB, pB, atB, alB, cB)
-
-        reward = run_match(agentA, agentB, num_hands=1000)
-        winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
-        if reward > 0: winsA += 1
-        elif reward < 0: winsB += 1
-        print(f"  Match {m+1}: {winner} wins ({reward:+d})")
+    if args.parallel > 1:
+        from multiprocessing import Pool
+        tasks = [(nameA, kA, pA, atA, alA, cA, thA, nameB, kB, pB, atB, alB, cB, thB, m)
+                 for m in range(args.matches)]
+        with Pool(args.parallel) as pool:
+            results = pool.map(_run_one_match, tasks)
+        for m, reward in sorted(results):
+            winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
+            if reward > 0: winsA += 1
+            elif reward < 0: winsB += 1
+            print(f"  Match {m+1}: {winner} wins ({reward:+d})")
+    else:
+        for m in range(args.matches):
+            agentA = SimpleAgent(nameA, kA, pA, atA, alA, cA, conf_threshold=thA)
+            agentB = SimpleAgent(nameB, kB, pB, atB, alB, cB, conf_threshold=thB)
+            reward = run_match(agentA, agentB, num_hands=1000)
+            winner = nameA if reward > 0 else (nameB if reward < 0 else "TIE")
+            if reward > 0: winsA += 1
+            elif reward < 0: winsB += 1
+            print(f"  Match {m+1}: {winner} wins ({reward:+d})")
 
     print(f"\nResult: {nameA}={winsA}W  {nameB}={winsB}W  TIE={args.matches-winsA-winsB}")
 

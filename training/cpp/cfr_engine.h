@@ -342,10 +342,14 @@ inline uint64_t make_postdiscard_key(int street, const int hand2[2], const int* 
 struct CFRNode {
     double regret_sum[MAX_ACTIONS] = {};
     double strategy_sum[MAX_ACTIONS] = {};
+    double cfv_sum = 0;    // accumulated counterfactual value (current player's EV)
+    double cfv_count = 0;  // number of CFV samples
     uint8_t num_actions = 0;
     uint8_t action_type = 0; // index into ACTION_LISTS
 
     void init(int n, uint8_t atype) { num_actions = n; action_type = atype; }
+    
+    double get_cfv() const { return cfv_count > 0 ? cfv_sum / cfv_count : 0.0; }
 
     void get_strategy(double out[MAX_ACTIONS], double reach_weight, int t) {
         double pos[MAX_ACTIONS], total = 0;
@@ -489,6 +493,10 @@ struct CFRTrainer {
             node.regret_sum[i] = std::max(
                 node.regret_sum[i] + opp_reach * (action_utils[i] - my_util), 0.0);
         }
+        
+        // Accumulate counterfactual value
+        node.cfv_sum += opp_reach * my_util;
+        node.cfv_count += opp_reach;
 
         return {node_util[0], node_util[1]};
     }
@@ -602,6 +610,9 @@ struct CFRTrainer {
             double conf = 0;
             for (int i = 0; i < node.num_actions; i++) conf += node.strategy_sum[i];
             f.write((char*)&conf, 8);
+            // CFV = average counterfactual value at this node
+            double cfv = node.get_cfv();
+            f.write((char*)&cfv, 8);
         }
         f.close();
     }
@@ -618,6 +629,8 @@ struct CFRTrainer {
             f.write((char*)&node.num_actions, 1);
             f.write((char*)node.regret_sum, MAX_ACTIONS * 8);
             f.write((char*)node.strategy_sum, MAX_ACTIONS * 8);
+            f.write((char*)&node.cfv_sum, 8);
+            f.write((char*)&node.cfv_count, 8);
         }
         f.close();
     }
@@ -630,6 +643,16 @@ struct CFRTrainer {
         iterations = ni;
         nodes.clear();
         nodes.reserve(nn);
+        
+        // Detect format: old = 8+1+1+64 = 74 bytes/node, new = 74+16 = 90 bytes/node
+        auto start_pos = f.tellg();
+        f.seekg(0, std::ios::end);
+        auto file_size = f.tellg();
+        f.seekg(start_pos);
+        size_t data_size = (size_t)file_size - 8;
+        size_t per_node = nn > 0 ? data_size / nn : 74;
+        bool has_cfv = (per_node >= 88);
+        
         for (uint32_t i = 0; i < nn; i++) {
             uint64_t key; uint8_t atype, nact;
             f.read((char*)&key, 8);
@@ -639,6 +662,10 @@ struct CFRTrainer {
             node.init(nact, atype);
             f.read((char*)node.regret_sum, MAX_ACTIONS * 8);
             f.read((char*)node.strategy_sum, MAX_ACTIONS * 8);
+            if (has_cfv) {
+                f.read((char*)&node.cfv_sum, 8);
+                f.read((char*)&node.cfv_count, 8);
+            }
         }
         f.close();
     }

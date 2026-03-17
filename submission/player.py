@@ -29,7 +29,7 @@ STRATEGY_ACTTYPE_PATH = os.path.join(DATA_DIR, "strategy_acttype.npy")
 STRATEGY_CONFIDENCE_PATH = os.path.join(DATA_DIR, "strategy_confidence.npy")
 STRATEGY_META_PATH = os.path.join(DATA_DIR, "strategy_meta.pkl")
 
-CONFIDENCE_THRESHOLD = 300000000.0  # ~median of 8M checkpoint; only well-visited nodes use CFR
+CONFIDENCE_THRESHOLD = 300000000.0  # default, overridden at load time by median of confidence
 
 _CTX_MAP = {"no_bet": 0, "facing_bet": 1}
 
@@ -134,8 +134,19 @@ class PlayerAgent(Agent):
             self.action_lists = meta['action_lists']
             self.key_to_idx = {int(keys[i]): i for i in range(len(keys))}
             self.strategy_loaded = True
+
+            # Adaptive threshold: more iterations → trust CFR more
+            # 8M → 50% CFR, 43M → 70%, 100M → 80%, 500M → 90%
+            import math
+            global CONFIDENCE_THRESHOLD
+            iters = meta.get('iterations', 1)
+            cfr_usage = min(0.90, 0.30 + 0.10 * math.log2(max(iters / 1_000_000, 1)))
+            percentile = 100.0 * (1.0 - cfr_usage)
+            if self.confidence is not None and len(self.confidence) > 0:
+                CONFIDENCE_THRESHOLD = float(np.percentile(self.confidence, max(percentile, 1)))
             self.logger.info(
-                f"Loaded strategy: {meta['iterations']} iters, {meta['num_nodes']} nodes"
+                f"Loaded strategy: {iters} iters, {meta['num_nodes']} nodes, "
+                f"cfr_usage={cfr_usage*100:.0f}%, threshold={CONFIDENCE_THRESHOLD:.0f}"
             )
         except Exception as e:
             self.logger.warning(f"Failed to load strategy: {e}")
@@ -325,10 +336,7 @@ class PlayerAgent(Agent):
         pot = my_bet + opp_bet
         pot_odds = to_call / (to_call + pot) if to_call > 0 and pot > 0 else 0
 
-        opp_combos = []
-        opp_weights = None
-
-        # ─── Compute MC equity (discard-aware) ───
+        # ─── Compute MC equity (blueprint range or discard-aware) ───
         if len(hand) == 2 and community:
             from abstractions.card_utils import get_evaluator, int_to_treys, ALL_CARDS
             from abstractions.discard_oracle import estimate_opp_keep_weights
@@ -341,36 +349,31 @@ class PlayerAgent(Agent):
                 if c >= 0: dead_set.add(c)
             remaining = [c for c in ALL_CARDS if c not in dead_set]
             board_need = 5 - len(community)
-            total_need = board_need + 2
 
-            if len(remaining) >= total_need:
+            opp_combos = list(combinations(remaining, 2))
+            opp_weights = None
+            board3 = community[:3] if len(community) >= 3 else community
+            if self.opp_discards and len(self.opp_discards) == 3 and all(c >= 0 for c in self.opp_discards):
+                w_dict = estimate_opp_keep_weights(self.opp_discards, board3, remaining)
+                if w_dict:
+                    opp_weights = [w_dict.get((c1, c2), 0.05) for c1, c2 in opp_combos]
+                    w_total = sum(opp_weights)
+                    if w_total > 0:
+                        opp_weights = [w / w_total for w in opp_weights]
+                    else:
+                        opp_weights = None
+
+            if len(remaining) >= board_need + 2:
                 my_h = [int_to_treys(c) for c in hand]
-
-                # Build weighted opponent range from their discards
-                opp_combos = list(combinations(remaining, 2))
-                board3 = community[:3] if len(community) >= 3 else community
-                opp_weights = None
-                if self.opp_discards and len(self.opp_discards) == 3 and all(c >= 0 for c in self.opp_discards):
-                    w_dict = estimate_opp_keep_weights(self.opp_discards, board3, remaining)
-                    if w_dict:
-                        opp_weights = [w_dict.get((c1, c2), 0.05) for c1, c2 in opp_combos]
-                        w_total = sum(opp_weights)
-                        if w_total > 0:
-                            opp_weights = [w / w_total for w in opp_weights]
-                        else:
-                            opp_weights = None
-
                 wins = ties = total = 0
                 import random as _rng
                 for _ in range(200):
-                    # Pick opponent hand (weighted or uniform)
                     if opp_weights:
                         opp_idx = _rng.choices(range(len(opp_combos)), weights=opp_weights, k=1)[0]
                         opp_pair = list(opp_combos[opp_idx])
                     else:
                         opp_pair = list(_rng.sample(remaining, 2))
 
-                    # Sample remaining board cards (excluding opp hand)
                     if board_need > 0:
                         board_remaining = [c for c in remaining if c not in opp_pair]
                         if len(board_remaining) < board_need:
@@ -553,7 +556,6 @@ class PlayerAgent(Agent):
         """Track opponent actions to maintain history."""
         opp_action = observation.get("opp_last_action", "None")
         if opp_action and opp_action != "None":
-            # Map engine action names to our short codes
             if opp_action == "FOLD":
                 self.street_history += "F"
             elif opp_action == "CHECK":
