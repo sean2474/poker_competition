@@ -22,13 +22,11 @@ Usage:
 
 import argparse
 import os
-import sys
 import time
 import random
 from tqdm import tqdm
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 
 from game_env import (
@@ -359,6 +357,16 @@ class DeepCFR:
                         if i in gens:
                             del gens[i]
 
+    @staticmethod
+    def _to_device(arr, dtype=torch.float32):
+        """Zero-copy numpy→tensor with async GPU transfer."""
+        t = torch.from_numpy(np.ascontiguousarray(arr)).to(dtype)
+        if DEVICE.type == 'cpu':
+            return t
+        if DEVICE.type == 'cuda':
+            return t.pin_memory().to(DEVICE, non_blocking=True)
+        return t.to(DEVICE)  # mps: no pin_memory support
+
     def train_networks(self, batch_size=2048, num_batches=100):
         """Train advantage networks FROM SCRATCH each iteration (paper Section 5.2)."""
         losses = [0, 0]
@@ -369,19 +377,17 @@ class DeepCFR:
             # CRITICAL: reinitialize network from scratch each iteration (paper Section 5.2)
             self.adv_nets[p] = AdvantageNet().to(DEVICE)
             opt = optim.Adam(self.adv_nets[p].parameters(), lr=self.lr)
-            
             net = self.adv_nets[p]
             
             total_loss = 0
             for _ in range(num_batches):
                 features, advantages, iterations, masks = self.adv_buffers[p].sample(batch_size)
-                
                 weights = 2.0 * iterations / max(self.total_iterations, 1)
                 
-                x = torch.tensor(features, dtype=torch.float32, device=DEVICE)
-                y = torch.tensor(advantages, dtype=torch.float32, device=DEVICE)
-                w = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
-                m = torch.tensor(masks, dtype=torch.float32, device=DEVICE)
+                x = self._to_device(features)
+                y = self._to_device(advantages)
+                w = self._to_device(weights)
+                m = self._to_device(masks)
                 
                 pred = net(x)
                 mask_sum = m.sum() + 1e-8
@@ -392,9 +398,7 @@ class DeepCFR:
                 opt.step()
                 total_loss += loss.item()
             
-            # Move back to CPU for traversal inference
             self.adv_nets[p] = self.adv_nets[p].cpu()
-            
             losses[p] = total_loss / num_batches
         
         return losses
@@ -456,13 +460,12 @@ class DeepCFR:
         total_loss = 0
         for b in range(num_batches):
             features, strategies, iterations, masks = self.strategy_buffer.sample(batch_size)
-            
             weights = 2.0 * iterations / max(self.total_iterations, 1)
             
-            x = torch.tensor(features, dtype=torch.float32, device=DEVICE)
-            y = torch.tensor(strategies, dtype=torch.float32, device=DEVICE)
-            w = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
-            m = torch.tensor(masks, dtype=torch.float32, device=DEVICE)
+            x = self._to_device(features)
+            y = self._to_device(strategies)
+            w = self._to_device(weights)
+            m = self._to_device(masks)
             
             logits = self.strategy_net(x)
             log_probs = torch.log_softmax(logits, dim=1)
@@ -477,7 +480,6 @@ class DeepCFR:
                 print(f"  Strategy net batch {b+1}/{num_batches}, loss={total_loss/(b+1):.4f}")
         
         self.strategy_net = self.strategy_net.cpu()
-        print(f"  Strategy net trained: avg loss={total_loss/num_batches:.4f}")
     
     def export(self, path):
         """Export torch models for submission inference."""
