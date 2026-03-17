@@ -21,6 +21,7 @@ class GameState:
         self.street_bets        = [[0, 0], [0, 0], [0, 0], [0, 0]]    # [street][player] max raise amt (chips, for C++)
         self.street_last_ratios = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]  # LAST bet/pot this street
         self.street_bet_counts  = [[0, 0], [0, 0], [0, 0], [0, 0]]     # num bets/raises per player per street
+        self.preflop_open_override = None  # override open raise_amt (chips above BB) for training diversity
 
     def copy(self):
         s = GameState()
@@ -36,6 +37,7 @@ class GameState:
         s.street_bets        = [list(b) for b in self.street_bets]
         s.street_last_ratios = [list(b) for b in self.street_last_ratios]
         s.street_bet_counts  = [list(b) for b in self.street_bet_counts]
+        s.preflop_open_override = self.preflop_open_override
         return s
 
     def get_valid_actions(self):
@@ -109,7 +111,7 @@ class GameState:
 
         if s.street == 0:
             # Preflop tiered sizing
-            _OPEN_AMT = int(round(1.5 * BIG_BLIND))  # open to 2.5bb (raise_amt=3 → bets=5)
+            _OPEN_AMT = s.preflop_open_override if s.preflop_open_override else int(round(1.5 * BIG_BLIND))
             if mn <= BIG_BLIND:                  # open
                 raise_amt = max(mn, min(_OPEN_AMT, max_raise))
             elif mn <= _OPEN_AMT:                # 3-bet
