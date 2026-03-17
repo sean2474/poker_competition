@@ -271,6 +271,7 @@ inline void opp_range_features(const int* opp_disc, const int* community, int n_
 }
 
 // Build full 93-dim feature vector (85 + 8 betting history)
+// Permutation invariant: hero hand and flop cards are sorted before encoding
 inline void state_to_features(
     const int* hero_hand2, const int* hero_hand5,
     const int* community, int n_comm,
@@ -282,20 +283,38 @@ inline void state_to_features(
 ) {
     int idx = 0;
 
-    // Hero hand (20 floats)
+    // Hero hand (20 floats) — sorted for permutation invariance
     if (use_hand5 && hero_hand5) {
-        for (int i = 0; i < 5; i++) card_features(hero_hand5[i], &features[idx + i*4]);
+        // Preflop: sort all 5 cards
+        int h5[5]; std::copy(hero_hand5, hero_hand5+5, h5);
+        std::sort(h5, h5+5);
+        for (int i = 0; i < 5; i++) card_features(h5[i], &features[idx + i*4]);
     } else {
-        card_features(hero_hand2[0], &features[idx]);
-        card_features(hero_hand2[1], &features[idx+4]);
+        // Post-discard: sort 2-card hand
+        int h2[2] = {hero_hand2[0], hero_hand2[1]};
+        if (h2[0] > h2[1]) std::swap(h2[0], h2[1]);
+        card_features(h2[0], &features[idx]);
+        card_features(h2[1], &features[idx+4]);
         for (int i = 8; i < 20; i++) features[idx+i] = 0.0f;
     }
     idx += 20;
 
-    // Community (20 floats)
+    // Community (20 floats) — flop sorted for permutation invariance
+    // Layout: [flop_0, flop_1, flop_2, turn, river]
+    // Sort flop (3 cards) but keep turn/river in temporal order
+    int sorted_comm[5] = {-1, -1, -1, -1, -1};
+    if (n_comm >= 3) {
+        int flop[3] = {community[0], community[1], community[2]};
+        std::sort(flop, flop + 3);
+        sorted_comm[0] = flop[0]; sorted_comm[1] = flop[1]; sorted_comm[2] = flop[2];
+        if (n_comm >= 4) sorted_comm[3] = community[3];
+        if (n_comm >= 5) sorted_comm[4] = community[4];
+    } else {
+        for (int i = 0; i < n_comm; i++) sorted_comm[i] = community[i];
+    }
     for (int i = 0; i < 5; i++) {
-        if (i < n_comm && community[i] >= 0)
-            card_features(community[i], &features[idx + i*4]);
+        if (i < n_comm && sorted_comm[i] >= 0)
+            card_features(sorted_comm[i], &features[idx + i*4]);
         else
             for (int j = 0; j < 4; j++) features[idx + i*4 + j] = 0.0f;
     }
