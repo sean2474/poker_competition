@@ -2,14 +2,17 @@
 # Deep CFR Training Script
 # Usage: bash train.sh [iterations] [traversals]
 #
-# RunPod: bash train.sh 500 2000
-# Local:  bash train.sh 50 200
+# RTX 3090 (24GB VRAM) + 32 vCPU + 125GB RAM:
+#   bash train.sh 500 2000
+# Local (MPS/CPU):
+#   bash train.sh 50 200
 set -e
 
 ITERS=${1:-500}
-TRAVERSALS=${2:-1000}
-BATCH_SIZE=${3:-65536}   # optimal: CUDA 840K/s @ 65536, MPS 1046K/s @ 32768
-TRAIN_BATCHES=${4:-50}   # 65536x50 = 3.3M samples per iter
+TRAVERSALS=${2:-2000}    # 32 vCPU: C++ OpenMP parallelizes batch_deal_discard
+BATCH_SIZE=${3:-131072}  # RTX 3090 24GB: 128K optimal (vs 65536 for smaller GPUs)
+TRAIN_BATCHES=${4:-100}  # 128K×100 = 12.8M samples/iter (4M buffer → 3× coverage)
+BUFFER_SIZE=${5:-4000000} # 4M reservoir (125GB RAM can hold ~8GB of samples easily)
 
 cd "$(dirname "$0")"
 
@@ -38,10 +41,11 @@ echo "Batch size: $BATCH_SIZE, Train batches: $TRAIN_BATCHES"
 echo ""
 
 python run.py \
-    --iterations "$ITERS" \
-    --traversals "$TRAVERSALS" \
-    --batch-size "$BATCH_SIZE" \
-    --train-batches "$TRAIN_BATCHES"
+    --iterations    "$ITERS"        \
+    --traversals    "$TRAVERSALS"   \
+    --batch-size    "$BATCH_SIZE"   \
+    --train-batches "$TRAIN_BATCHES" \
+    --buffer-size   "$BUFFER_SIZE"
 
 echo ""
 echo "=== Training Complete ==="
