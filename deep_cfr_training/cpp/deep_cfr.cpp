@@ -209,12 +209,20 @@ public:
     int total_iterations = 1;
     int num_threads = 1;
 
-    DeepCFRTrainer(float learning_rate = 0.001f, int buffer_size = 2000000, int threads = 1)
+    torch::Device device = torch::kCPU;
+
+    DeepCFRTrainer(float learning_rate = 0.001f, int buffer_size = 2000000, int threads = 1, bool use_gpu = false)
         : lr(learning_rate),
           adv_buffers{ReservoirBuffer(buffer_size), ReservoirBuffer(buffer_size)},
           strategy_buffer(buffer_size),
           num_threads(threads)
     {
+        if (use_gpu && torch::cuda::is_available()) {
+            device = torch::kCUDA;
+            std::cout << "Using GPU: CUDA" << std::endl;
+        } else {
+            std::cout << "Using CPU" << std::endl;
+        }
         adv_nets[0] = AdvantageNet();
         adv_nets[1] = AdvantageNet();
         strategy_net = StrategyNet();
@@ -454,13 +462,14 @@ public:
 
             // Reinitialize from scratch (paper Section 5.2)
             adv_nets[p] = AdvantageNet();
+            adv_nets[p]->to(device);
             auto optimizer = torch::optim::Adam(adv_nets[p]->parameters(), lr);
 
             for (int b = 0; b < num_batches; b++) {
-                // Sample batch
                 std::vector<int> indices(batch_size);
                 std::uniform_int_distribution<int> dist(0, adv_buffers[p].size() - 1);
-                for (int i = 0; i < batch_size; i++) indices[i] = dist(rng);
+                std::mt19937 sample_rng(b);
+                for (int i = 0; i < batch_size; i++) indices[i] = dist(sample_rng);
 
                 auto x = torch::zeros({batch_size, FEATURE_DIM});
                 auto y = torch::zeros({batch_size, NUM_ACTIONS});
@@ -475,6 +484,9 @@ public:
                     w[i] = 2.0f * s.iteration / std::max(total_iterations, 1);
                 }
 
+                // Move to GPU for training
+                x = x.to(device); y = y.to(device); w = w.to(device); m = m.to(device);
+
                 auto pred = adv_nets[p]->forward(x);
                 auto mask_sum = m.sum() + 1e-8f;
                 auto loss = ((pred - y).pow(2) * w.unsqueeze(1) * m).sum() / mask_sum;
@@ -483,12 +495,15 @@ public:
                 loss.backward();
                 optimizer.step();
             }
+            // Move back to CPU for traversal inference
+            adv_nets[p]->to(torch::kCPU);
         }
     }
 
     void train_strategy_net(int batch_size, int num_batches) {
         if (strategy_buffer.size() < batch_size) return;
 
+        strategy_net->to(device);
         auto optimizer = torch::optim::Adam(strategy_net->parameters(), lr);
 
         float total_loss = 0;
@@ -519,6 +534,7 @@ public:
             optimizer.step();
             total_loss += loss.item<float>();
         }
+        strategy_net->to(torch::kCPU);
         std::cout << "  Strategy net loss: " << total_loss / num_batches << std::endl;
     }
 
@@ -632,6 +648,7 @@ int main(int argc, char** argv) {
     int num_batches = 200;
     float lr = 0.001f;
     int threads = 1;
+    bool use_gpu = false;
     std::string output = "deep_cfr_weights";
 
     for (int i = 1; i < argc; i++) {
@@ -642,11 +659,12 @@ int main(int argc, char** argv) {
         else if (arg == "--train-batches" && i+1 < argc) num_batches = std::atoi(argv[++i]);
         else if (arg == "--lr" && i+1 < argc) lr = std::atof(argv[++i]);
         else if (arg == "--threads" && i+1 < argc) threads = std::atoi(argv[++i]);
+        else if (arg == "--gpu") use_gpu = true;
         else if (arg == "--output" && i+1 < argc) output = argv[++i];
     }
 
-    std::cout << "Threads: " << threads << std::endl;
-    DeepCFRTrainer trainer(lr, 2000000, threads);
+    std::cout << "Threads: " << threads << (use_gpu ? " + GPU" : "") << std::endl;
+    DeepCFRTrainer trainer(lr, 2000000, threads, use_gpu);
     trainer.run(iterations, traversals, batch_size, num_batches);
     trainer.save(output);
 
