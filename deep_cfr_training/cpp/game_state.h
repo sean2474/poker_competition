@@ -52,7 +52,8 @@ struct GameState {
         int opp = 1 - cp;
         int to_call = bets[opp] - bets[cp];
         int max_raise = MAX_BET - std::max(bets[0], bets[1]);
-        bool can_raise = max_raise > 0 && min_raise <= max_raise;
+        // Preflop: allow all-in even if < min_raise (incomplete raise is ok)
+        bool can_raise = max_raise > 0 && (street > 0 ? min_raise <= max_raise : true);
 
         if (to_call > 0) {
             actions[n++] = A_FOLD;
@@ -127,11 +128,15 @@ struct GameState {
         int mn = s.min_raise;
         int raise_amt;
         if (st == 0) {
-            // Preflop: single size — 3xBB for first raise, 3x previous for re-raises
-            if (mn == BIG_BLIND)
-                raise_amt = std::max(mn, std::min(3 * BIG_BLIND, max_raise));  // open: 6
-            else
-                raise_amt = std::max(mn, std::min(3 * mn, max_raise));  // re-raise: 3x prev
+            // Preflop tiered sizing (mn = min_raise = previous raise amount)
+            if (mn <= BIG_BLIND)                        // open
+                raise_amt = std::max(mn, std::min(3 * BIG_BLIND, max_raise));      // 6
+            else if (mn <= 3 * BIG_BLIND)               // 3-bet
+                raise_amt = std::max(mn, std::min(3 * mn, max_raise));             // 18
+            else if (mn <= 9 * BIG_BLIND)               // 4-bet: fixed 2.5x 3-bet
+                raise_amt = std::max(mn, std::min(45, max_raise));                 // 45
+            else                                        // 5-bet+: all-in
+                raise_amt = max_raise;
         } else {
             // Postflop: pot-relative sizing
             if (action == A_BET_SMALL || action == A_RAISE_SMALL)
@@ -141,7 +146,11 @@ struct GameState {
             else
                 raise_amt = std::max(mn, std::min(pot * 75 / 100, max_raise));
         }
-        raise_amt = std::max(s.min_raise, std::min(raise_amt, max_raise));
+        // Preflop: allow all-in even if < standard size (incomplete raise)
+        if (st == 0)
+            raise_amt = std::min(raise_amt, max_raise);
+        else
+            raise_amt = std::max(s.min_raise, std::min(raise_amt, max_raise));
         if (st < 4) s.street_bets[st][cp] = std::max(s.street_bets[st][cp], raise_amt);
         s.bets[cp] = s.bets[opp] + raise_amt;
         s.min_raise = std::max(raise_amt, s.min_raise);

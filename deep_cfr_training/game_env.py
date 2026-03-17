@@ -175,7 +175,8 @@ class GameState:
         opp = 1 - cp
         to_call = self.bets[opp] - self.bets[cp]
         max_raise = MAX_BET - max(self.bets)
-        can_raise = max_raise > 0 and self.min_raise <= max_raise
+        # Preflop: allow all-in even if < min_raise (incomplete raise)
+        can_raise = max_raise > 0 and (self.street > 0 or self.min_raise <= max_raise or True)
         
         actions = []
         if to_call > 0:
@@ -243,11 +244,15 @@ class GameState:
         pot = s.bets[0] + s.bets[1]
         mn = s.min_raise
         if s.street == 0:
-            # Preflop: single size — 3xBB for first raise, 3x previous for re-raises
-            if mn == BIG_BLIND:
-                raise_amt = max(mn, min(3 * BIG_BLIND, max_raise))  # open: 6
-            else:
-                raise_amt = max(mn, min(3 * mn, max_raise))  # re-raise: 3x prev
+            # Preflop tiered sizing (mn = previous raise amount)
+            if mn <= BIG_BLIND:                      # open
+                raise_amt = max(mn, min(3 * BIG_BLIND, max_raise))   # 6
+            elif mn <= 3 * BIG_BLIND:                # 3-bet
+                raise_amt = max(mn, min(3 * mn, max_raise))          # 18
+            elif mn <= 9 * BIG_BLIND:                # 4-bet: fixed 2.5x 3-bet
+                raise_amt = max(mn, min(45, max_raise))               # 45
+            else:                                    # 5-bet+: all-in
+                raise_amt = max_raise
         else:
             # Postflop: pot-relative
             if action in (A_BET_SMALL, A_RAISE_SMALL):
@@ -257,7 +262,11 @@ class GameState:
             else:
                 raise_amt = max(mn, min(int(pot * 0.75), max_raise))
         
-        raise_amt = max(s.min_raise, min(raise_amt, max_raise))
+        # Preflop: allow incomplete raise (all-in)
+        if s.street == 0:
+            raise_amt = min(raise_amt, max_raise)
+        else:
+            raise_amt = max(s.min_raise, min(raise_amt, max_raise))
         s.street_bets[s.street][cp] = max(s.street_bets[s.street][cp], raise_amt)
         s.bets[cp] = s.bets[opp] + raise_amt
         s.min_raise = max(raise_amt, s.min_raise)
