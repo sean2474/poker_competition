@@ -17,7 +17,10 @@ import torch
 
 from game import GameState, state_to_features, evaluate_showdown, batch_deal_discard
 from game.constants import NUM_ACTIONS
-from preflop_solver.canonical import canonicalize
+from preflop_cfr.canonical import canonicalize
+from preflop_cfr.equity   import warmup_ev
+
+WARMUP_ITERS = 50  # use equity approximation until postflop net is meaningful
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -113,7 +116,7 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
     # ── PREFLOP: tabular CFR (no network inference) ───────────────────────
     if state.street == 0:
         key  = _preflop_key(hand5, state)
-        regs = trainer.preflop_regrets.get(key, np.zeros(NUM_ACTIONS))
+        regs = trainer.preflop_regrets.get(key, np.zeros(_PF_SLOTS))
         strategy = _tabular_strategy(regs, valid_actions)
 
         # Explore ALL actions (complete tree for preflop)
@@ -148,7 +151,12 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
 
         return ev
 
-    # ── POSTFLOP: neural network (batch inference via yield) ──────────────
+    # ── POSTFLOP: warmup OR neural network ───────────────────────────────
+    # During warmup: equity-based EV (postflop net is too noisy to trust)
+    if getattr(trainer, 'iteration', 1) <= getattr(trainer, 'warmup_iters', WARMUP_ITERS):
+        eq_ev = warmup_ev(p0_hand5, p1_hand5, state, traversing_player)
+        return eq_ev
+
     vis_comm = ([], community[:3], community[:4], community[:5])[min(state.street, 3)]
     features = state_to_features(
         hand, vis_comm, state.bets[cp], state.bets[1 - cp],

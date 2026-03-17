@@ -68,6 +68,7 @@ class DeepCFR:
         self.total_iterations = 1
         self.batch_size       = 2048
         self.num_batches      = 100
+        self.warmup_iters     = 50   # use equity EV until postflop net converges
 
     # ── Delegate to modules ──────────────────────────────────────────────────
 

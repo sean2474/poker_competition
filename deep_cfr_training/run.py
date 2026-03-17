@@ -2,12 +2,13 @@
 Deep CFR — entry point.
 
 Package layout:
-  game/    : GameState, features, constants
-  models/  : AdvantageNet, StrategyNet, ReservoirBuffer
-  cfr/     : DeepCFR, traversal, training, runner
+  game/         : GameState, features, constants
+  models/       : AdvantageNet, StrategyNet, ReservoirBuffer
+  preflop_cfr/  : canonical, equity (warmup), tabular CFR tables
+  postflop_cfr/ : DeepCFR, traversal (hybrid), training, runner
 
 Usage:
-    python deep_cfr.py --iterations 500 --traversals 2000
+    python run.py --iterations 500 --traversals 2000
 """
 
 import argparse
@@ -16,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cfr import DeepCFR, DEVICE  # noqa: F401 (DEVICE exported for benchmark.py)
+from postflop_cfr import DeepCFR, DEVICE  # noqa: F401 (DEVICE re-exported for benchmark.py)
 
 
 def main():
@@ -29,6 +30,7 @@ def main():
     parser.add_argument("--lr",             type=float, default=1e-3)
     parser.add_argument("--buffer-size",    type=int,   default=2_000_000)
     parser.add_argument("--checkpoint-every", type=int, default=50)
+    parser.add_argument("--warmup-iters",     type=int, default=50)
     _default = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model', 'deep_cfr')
     parser.add_argument("--output",         type=str,   default=_default)
     args = parser.parse_args()
@@ -36,6 +38,7 @@ def main():
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     trainer = DeepCFR(lr=args.lr, buffer_size=args.buffer_size)
+    trainer.warmup_iters = args.warmup_iters
     trainer.run(
         num_iterations      = args.iterations,
         traversals_per_iter = args.traversals,
