@@ -29,9 +29,7 @@ fi
 cd ..
 
 # 2. Install dependencies
-echo ""
-echo "=== Installing dependencies ==="
-pip install torch tqdm numpy 2>/dev/null || true
+pip install torch tqdm numpy --quiet 2>/dev/null || true
 
 # 3. Run training
 echo ""

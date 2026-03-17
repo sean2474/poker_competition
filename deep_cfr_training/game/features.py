@@ -18,7 +18,6 @@ for _ext in ['libtraversal.so', 'libtraversal.dylib']:
 
 assert _c_lib is not None, (
     f"C++ library not found in {_cpp_dir}.\n"
-    "Build: cd cpp && bash build.sh"
 )
 
 # ── Function signatures ─────────────────────────────────────────────────────
