@@ -46,33 +46,66 @@ print(f'Training device: {DEVICE}')
 
 
 class ReservoirBuffer:
-    """Fixed-size reservoir sampling buffer for advantage memories."""
-    
+    """
+    Reservoir sampling buffer with stratified street sampling.
+    Preflop samples dominate without stratification (4:2:1:0.5 ratio).
+    With stratification, each street contributes equally to every batch.
+    """
+
     def __init__(self, capacity=2_000_000):
         self.capacity = capacity
-        self.buffer = []
         self.count = 0
-    
-    def add(self, features, values, iteration, valid_mask=None):
+        # Separate sub-buffers per street for stratified sampling
+        self.street_bufs = [[] for _ in range(4)]
+        self.street_counts = [0] * 4
+        self._sub_cap = capacity // 4  # equal capacity per street
+
+    def add(self, features, values, iteration, valid_mask=None, street=None):
+        s = int(street) if street is not None else 0
+        s = max(0, min(s, 3))
         self.count += 1
+        self.street_counts[s] += 1
         item = (features, values, iteration, valid_mask)
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(item)
+        buf = self.street_bufs[s]
+        if len(buf) < self._sub_cap:
+            buf.append(item)
         else:
-            idx = random.randint(0, self.count - 1)
-            if idx < self.capacity:
-                self.buffer[idx] = item
-    
+            idx = random.randint(0, self.street_counts[s] - 1)
+            if idx < self._sub_cap:
+                buf[idx] = item
+
     def sample(self, batch_size):
-        batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
-        features = np.array([b[0] for b in batch])
-        values = np.array([b[1] for b in batch])
+        # Stratified: sample equally from each non-empty street
+        non_empty = [s for s in range(4) if self.street_bufs[s]]
+        if not non_empty:
+            # fallback: empty
+            dummy = np.zeros((1, 1), dtype=np.float32)
+            return dummy, dummy, np.ones(1, dtype=np.float32), dummy
+
+        per_street = max(1, batch_size // len(non_empty))
+        batch = []
+        for s in non_empty:
+            k = min(per_street, len(self.street_bufs[s]))
+            batch.extend(random.sample(self.street_bufs[s], k))
+
+        # Trim/pad to exactly batch_size
+        if len(batch) > batch_size:
+            batch = random.sample(batch, batch_size)
+
+        features   = np.array([b[0] for b in batch])
+        values     = np.array([b[1] for b in batch])
         iterations = np.array([b[2] for b in batch], dtype=np.float32)
-        masks = np.array([b[3] if b[3] is not None else np.ones(values.shape[1]) for b in batch])
+        masks      = np.array([b[3] if b[3] is not None
+                               else np.ones(values.shape[1]) for b in batch])
         return features, values, iterations, masks
-    
+
+    @property
+    def buffer(self):
+        """Flat view for compatibility (e.g. len checks)."""
+        return [item for s in self.street_bufs for item in s]
+
     def __len__(self):
-        return len(self.buffer)
+        return sum(len(b) for b in self.street_bufs)
 
 
 class DeepCFR:
@@ -172,7 +205,7 @@ class DeepCFR:
             valid_mask = np.zeros(NUM_ACTIONS)
             for a in valid_actions:
                 valid_mask[a] = 1.0
-            self.adv_buffers[cp].add(features, advantages, self.iteration, valid_mask)
+            self.adv_buffers[cp].add(features, advantages, self.iteration, valid_mask, street=state.street)
             
             return ev
         
@@ -186,7 +219,7 @@ class DeepCFR:
             for a in valid_actions:
                 strat_target[a] = strategy[a]
                 valid_mask[a] = 1.0
-            self.strategy_buffer.add(features, strat_target, self.iteration, valid_mask)
+            self.strategy_buffer.add(features, strat_target, self.iteration, valid_mask, street=state.street)
             
             actions = list(strategy.keys())
             probs = [strategy[a] for a in actions]
@@ -261,7 +294,7 @@ class DeepCFR:
             for a in valid_actions:
                 advantages[a] = action_values[a] - ev
                 valid_mask[a] = 1.0
-            self.adv_buffers[cp].add(features, advantages, self.iteration, valid_mask)
+            self.adv_buffers[cp].add(features, advantages, self.iteration, valid_mask, street=state.street)
             return ev
 
         else:
@@ -270,7 +303,7 @@ class DeepCFR:
             for a in valid_actions:
                 strat_target[a] = strategy.get(a, 0)
                 valid_mask[a] = 1.0
-            self.strategy_buffer.add(features, strat_target, self.iteration, valid_mask)
+            self.strategy_buffer.add(features, strat_target, self.iteration, valid_mask, street=state.street)
 
             actions = list(strategy.keys())
             probs = [strategy[a] for a in actions]
