@@ -425,50 +425,94 @@ class DeepCFR:
         
         return losses
     
+    def save_checkpoint(self, path, iteration):
+        """Save training checkpoint (buffers + nets + state)."""
+        import torch
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({
+            'iteration': iteration,
+            'total_iterations': self.total_iterations,
+            'adv_net_0': self.adv_nets[0].state_dict(),
+            'adv_net_1': self.adv_nets[1].state_dict(),
+            'strategy_net': self.strategy_net.state_dict(),
+        }, path)
+
+    def load_checkpoint(self, path):
+        """Resume from checkpoint. Returns iteration number."""
+        import torch
+        if not os.path.exists(path):
+            return 0
+        ckpt = torch.load(path, map_location='cpu')
+        self.adv_nets[0].load_state_dict(ckpt['adv_net_0'])
+        self.adv_nets[1].load_state_dict(ckpt['adv_net_1'])
+        self.strategy_net.load_state_dict(ckpt['strategy_net'])
+        self.total_iterations = ckpt.get('total_iterations', self.total_iterations)
+        it = ckpt.get('iteration', 0)
+        print(f"Resumed from checkpoint: iter {it}/{self.total_iterations}")
+        return it
+
     def run(self, num_iterations=500, traversals_per_iter=1000,
-            train_interval=1, batch_size=2048, num_batches=100):
+            train_interval=1, batch_size=2048, num_batches=100,
+            checkpoint_interval=50, checkpoint_dir='model'):
         """Main Deep CFR training loop."""
-        
+
         self.total_iterations = num_iterations
-        
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Resume from latest checkpoint if exists
+        ckpt_path = os.path.join(checkpoint_dir, 'checkpoint_latest.pt')
+        start_iter = self.load_checkpoint(ckpt_path)
+
         print(f"Deep CFR Training: {num_iterations} iters × {traversals_per_iter} traversals")
         print(f"Feature dim: {FEATURE_DIM}, Actions: {NUM_ACTIONS}")
+        if start_iter > 0:
+            print(f"Resuming from iter {start_iter}")
         print()
-        
+
         t0 = time.time()
-        
-        for t in tqdm(range(num_iterations), desc='CFR iters'):
+        losses = [0.0, 0.0]
+
+        pbar = tqdm(range(start_iter, num_iterations), desc='CFR iters',
+                    initial=start_iter, total=num_iterations)
+        for t in pbar:
             self.iteration = t + 1
-            
-            # Batched traversals: both players in one C++ batch deal
+
+            # Batched traversals
             for traversing in range(2):
                 self.run_traversals_batched(traversals_per_iter, traversing)
-            
-            # Train networks periodically
+
+            # Train networks
             if (t + 1) % train_interval == 0:
                 losses = self.train_networks(batch_size, num_batches)
-            
-            # Progress
+
+            # tqdm postfix
             elapsed = time.time() - t0
-            ips = (t + 1) / elapsed
-            eta = (num_iterations - t - 1) / ips if ips > 0 else 0
+            done = t - start_iter + 1
+            ips = done / elapsed if elapsed > 0 else 0
             buf_sizes = [len(b) for b in self.adv_buffers]
-            
-            if (t + 1) % 10 == 0 or t == 0:
-                print(f"  iter {t+1}/{num_iterations}  "
-                      f"{ips:.1f} it/s  "
-                      f"buffers=[{buf_sizes[0]:,}, {buf_sizes[1]:,}]  "
-                      f"loss=[{losses[0]:.4f}, {losses[1]:.4f}]  "
-                      f"ETA {int(eta)}s")
-        
-        # Train average strategy network on strategy buffer
-        print("\nTraining average strategy network...")
+            street_dist = [len(self.adv_buffers[0].street_bufs[s]) for s in range(4)]
+            pbar.set_postfix({
+                'it/s':  f'{ips:.1f}',
+                'loss':  f'{losses[0]:.3f}/{losses[1]:.3f}',
+                'buf':   f'{buf_sizes[0]//1000}K/{buf_sizes[1]//1000}K',
+                'st':    '/'.join(str(s//100) for s in street_dist) + 'h',
+            })
+
+            # Checkpoint
+            if (t + 1) % checkpoint_interval == 0:
+                self.save_checkpoint(ckpt_path, t + 1)
+                tagged = os.path.join(checkpoint_dir, f'checkpoint_{t+1:04d}.pt')
+                self.save_checkpoint(tagged, t + 1)
+                tqdm.write(f"  [ckpt] saved iter {t+1} → {tagged}")
+
+        # Final strategy net training
+        tqdm.write("\nTraining average strategy network...")
         self.train_strategy_net(batch_size, num_batches * 3)
-        
+
         elapsed = time.time() - t0
-        print(f"\nDone: {num_iterations} iters in {elapsed:.0f}s")
-        print(f"Adv buffers: [{len(self.adv_buffers[0]):,}, {len(self.adv_buffers[1]):,}]")
-        print(f"Strategy buffer: {len(self.strategy_buffer):,}")
+        tqdm.write(f"\nDone: {num_iterations} iters in {elapsed:.0f}s  ({elapsed/num_iterations:.1f}s/iter)")
+        tqdm.write(f"Adv buffers: [{len(self.adv_buffers[0]):,}, {len(self.adv_buffers[1]):,}]")
+        tqdm.write(f"Strategy buffer: {len(self.strategy_buffer):,}")
     
     def train_strategy_net(self, batch_size=2048, num_batches=300):
         """Train average strategy network on strategy buffer."""
