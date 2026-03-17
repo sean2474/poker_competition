@@ -123,7 +123,6 @@ def load_checkpoint(trainer, path) -> int:
 def export(trainer, path_prefix):
     """Export strategy nets + preflop chart for submission inference."""
     import pickle, numpy as np
-    from preflop_cfr.strength import preflop_score
     os.makedirs(os.path.dirname(path_prefix) or '.', exist_ok=True)
 
     # Postflop strategy net
@@ -135,17 +134,9 @@ def export(trainer, path_prefix):
         total = s_sum.sum()
         preflop_chart[key] = s_sum / total if total > 0 else s_sum.copy()
 
-    # Preflop scores: one score per canonical hand (key[0])
-    # Used at inference to apply off-size open adjustments
-    preflop_scores = {}
-    for key in preflop_chart:
-        canonical_hand = key[0]   # tuple of 5 card ints
-        if canonical_hand not in preflop_scores:
-            preflop_scores[canonical_hand] = preflop_score(canonical_hand)
-
     pf_chart_path = path_prefix + '_preflop_chart.pkl'
     with open(pf_chart_path, 'wb') as f:
-        pickle.dump({'chart': preflop_chart, 'scores': preflop_scores}, f)
+        pickle.dump(preflop_chart, f)
 
     # Full checkpoint
     torch.save({
