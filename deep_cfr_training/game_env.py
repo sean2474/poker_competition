@@ -154,7 +154,7 @@ class GameState:
         self.history = []
         self.last_street_bet = 0
         self.num_actions_this_street = 0
-        self.street_bets = [[0, 0], [0, 0], [0, 0], [0, 0]]  # [street][player]
+        self.street_bets = [[0, 0], [0, 0], [0, 0], [0, 0]]  # [street][player] max raise amount
     
     def copy(self):
         s = GameState()
@@ -193,11 +193,11 @@ class GameState:
                 small_amt = max(mn, min(int(pot * 0.33), max_raise))
                 large_amt = max(mn, min(int(pot * 0.75), max_raise))
                 pot_amt   = max(mn, min(pot,             max_raise))
-                # Add deduplicated actions (skip if within 2 chips of a larger one)
+                thresh = max(2, pot // 20)  # 5% of pot, min 2
                 actions.append(A_BET_SMALL)
-                if abs(pot_amt - large_amt) > 2:
+                if abs(pot_amt - large_amt) > thresh:
                     actions.append(A_BET_POT)
-                if abs(large_amt - small_amt) > 2:
+                if abs(large_amt - small_amt) > thresh:
                     actions.append(A_BET_LARGE)
         return actions
     
@@ -235,7 +235,6 @@ class GameState:
         
         # Raise/bet
         s.num_actions_this_street += 1
-        s.street_bets[s.street][cp] += 1
         pot = s.bets[0] + s.bets[1]
         mn = s.min_raise
         if action in (A_BET_SMALL, A_RAISE_SMALL):
@@ -246,6 +245,7 @@ class GameState:
             raise_amt = max(mn, min(int(pot * 0.75), max_raise))
         
         raise_amt = max(s.min_raise, min(raise_amt, max_raise))
+        s.street_bets[s.street][cp] = max(s.street_bets[s.street][cp], raise_amt)
         s.bets[cp] = s.bets[opp] + raise_amt
         s.min_raise = max(raise_amt, s.min_raise)
         s.current_player = opp

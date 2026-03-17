@@ -44,7 +44,7 @@ struct GameState {
     int folded_player = -1;
     int min_raise = BIG_BLIND;
     int num_actions_this_street = 0;
-    int street_bets[4][2] = {};  // [street][player] bet/raise count
+    int street_bets[4][2] = {};  // [street][player] max raise amount (0-100)
 
     void get_valid_actions(int* actions, int& n) const {
         n = 0;
@@ -69,10 +69,11 @@ struct GameState {
                 int small_amt = std::max(min_raise, std::min(pot * 33 / 100, max_raise));
                 int large_amt = std::max(min_raise, std::min(pot * 75 / 100, max_raise));
                 int pot_amt   = std::max(min_raise, std::min(pot,             max_raise));
+                int thresh = std::max(2, pot / 20);  // 5% of pot, min 2
                 actions[n++] = A_BET_SMALL;
-                if (std::abs(pot_amt - large_amt) > 2)
+                if (std::abs(pot_amt - large_amt) > thresh)
                     actions[n++] = A_BET_POT;
-                if (std::abs(large_amt - small_amt) > 2)
+                if (std::abs(large_amt - small_amt) > thresh)
                     actions[n++] = A_BET_LARGE;
             }
         }
@@ -114,7 +115,6 @@ struct GameState {
 
         // Raise/bet
         s.num_actions_this_street++;
-        if (st < 4) s.street_bets[st][cp]++;
         int pot = s.bets[0] + s.bets[1];
         int mn = s.min_raise;
         int raise_amt;
@@ -126,6 +126,7 @@ struct GameState {
             raise_amt = std::max(mn, std::min(pot * 75 / 100, max_raise));
         }
         raise_amt = std::max(s.min_raise, std::min(raise_amt, max_raise));
+        if (st < 4) s.street_bets[st][cp] = std::max(s.street_bets[st][cp], raise_amt);
         s.bets[cp] = s.bets[opp] + raise_amt;
         s.min_raise = std::max(raise_amt, s.min_raise);
         s.current_player = opp;
@@ -396,11 +397,11 @@ inline void state_to_features(
     }
     idx += 6;
 
-    // Betting history (8): per-street bet count for hero + opp
-    // Normalized by max reasonable bets per street (3)
+    // Betting history (8): per-street max raise amount for hero + opp
+    // Normalized by MAX_BET — captures SIZING not just frequency
     for (int s = 0; s < 4; s++) {
-        float my_bets = street_bets ? (float)street_bets[s][is_bb ? 1 : 0] / 3.0f : 0.0f;
-        float op_bets = street_bets ? (float)street_bets[s][is_bb ? 0 : 1] / 3.0f : 0.0f;
+        float my_bets = street_bets ? (float)street_bets[s][is_bb ? 1 : 0] / (float)MAX_BET : 0.0f;
+        float op_bets = street_bets ? (float)street_bets[s][is_bb ? 0 : 1] / (float)MAX_BET : 0.0f;
         features[idx++] = std::min(my_bets, 1.0f);
         features[idx++] = std::min(op_bets, 1.0f);
     }
