@@ -418,7 +418,7 @@ class PlayerAgent(Agent):
         # ─── Action decision ───
         def _act(action_str, action_type, raise_amt=0):
             self.street_history += action_to_short(action_str)
-            if action_str in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
+            if action_str in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE"):
                 self.hero_last_raiser = True
                 self.villain_last_raiser = False
             return (action_type, raise_amt, 0, 0)
@@ -545,7 +545,7 @@ class PlayerAgent(Agent):
 
         if use_cfr and cfr_action is not None:
             self.street_history += action_to_short(cfr_abs)
-            if cfr_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE", "JAM"):
+            if cfr_abs in ("BET_SMALL", "BET_LARGE", "RAISE_SMALL", "RAISE_LARGE"):
                 self.hero_last_raiser = True
                 self.villain_last_raiser = False
             return self._clamp_raise(cfr_action, observation)

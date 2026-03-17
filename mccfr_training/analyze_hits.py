@@ -206,7 +206,7 @@ def analyze():
                         chosen = valid_abs[ci]
                         action = abstract_to_concrete(chosen, min_raise, max_raise, my_bet, opp_bet)
                         street_history += action_to_short(chosen)
-                        if chosen in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE","JAM"):
+                        if chosen in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE"):
                             hero_agg = True; villain_agg = False
                     else:
                         stats['cfr_misses'] += 1

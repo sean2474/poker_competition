@@ -40,7 +40,7 @@ def convert_bin_to_numpy(bin_path, out_dir):
     import numpy as np
 
     ACTION_LISTS = [
-        ("FOLD", "CALL", "JAM"),
+        ("FOLD", "CALL"),
         ("FOLD", "CALL"),
         ("FOLD", "CALL", "RAISE_SMALL", "RAISE_LARGE"),
         ("CHECK", "BET_SMALL", "BET_LARGE"),

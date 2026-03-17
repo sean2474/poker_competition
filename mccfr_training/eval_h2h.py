@@ -53,7 +53,7 @@ def convert_bin(bin_path):
     per_node = (len(data) - 8) / nodes if nodes > 0 else 42
     has_conf = (per_node >= 49.5)
 
-    ACTION_LISTS = [('FOLD','CALL','JAM'),('FOLD','CALL'),('FOLD','CALL','RAISE_SMALL','RAISE_LARGE'),
+    ACTION_LISTS = [('FOLD','CALL'),('FOLD','CALL'),('FOLD','CALL','RAISE_SMALL','RAISE_LARGE'),
                     ('CHECK','BET_SMALL','BET_LARGE'),('CHECK',)]
     MAX_ACTIONS = 4
 
@@ -448,7 +448,7 @@ class SimpleAgent:
                     amt = self._refine_size(chosen_abs, obs)
                     cfr_action = (at, amt, k1, k2)
                 self.street_history += action_to_short(chosen_abs)
-                if chosen_abs in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE","JAM"):
+                if chosen_abs in ("BET_SMALL","BET_LARGE","RAISE_SMALL","RAISE_LARGE"):
                     self.hero_last_raiser = True
                     self.villain_last_raiser = False
                 return self._clamp(cfr_action, obs)

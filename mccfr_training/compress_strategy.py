@@ -24,7 +24,7 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 # The 5 known action list types (from training analysis)
 ACTION_LISTS = [
-    ("FOLD", "CALL", "JAM"),                       # 0
+    ("FOLD", "CALL"),                                # 0
     ("FOLD", "CALL"),                               # 1
     ("FOLD", "CALL", "RAISE_SMALL", "RAISE_LARGE"), # 2
     ("CHECK", "BET_SMALL", "BET_LARGE"),            # 3
