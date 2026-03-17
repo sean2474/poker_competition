@@ -285,8 +285,9 @@ def main():
     tr_ms = bench_train_step(net, opt, device, reps=reps, use_amp=False)
     print(f"  [4] fwd+bwd+step  FP32:                {tr_ms:6.1f} ms")
     if device.type == 'cuda':
-        tr_amp_ms = bench_train_step(make_net(device), optim.Adam(make_net(device).parameters(), lr=3e-4),
-                                     device, reps=reps, use_amp=True)
+        _amp_net = make_net(device)
+        _amp_opt = optim.Adam(_amp_net.parameters(), lr=3e-4)
+        tr_amp_ms = bench_train_step(_amp_net, _amp_opt, device, reps=reps, use_amp=True)
         print(f"  [4] fwd+bwd+step  BF16-AMP:            {tr_amp_ms:6.1f} ms  ({tr_ms/tr_amp_ms:.1f}x)")
     else:
         tr_amp_ms = tr_ms
