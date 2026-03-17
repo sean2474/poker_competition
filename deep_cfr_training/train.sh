@@ -8,7 +8,7 @@ set -e
 
 ITERS=${1:-500}
 TRAVERSALS=${2:-1000}
-BATCH_SIZE=${3:-4096}
+BATCH_SIZE=${3:-8192}
 TRAIN_BATCHES=${4:-200}
 
 cd "$(dirname "$0")"
