@@ -53,11 +53,13 @@ def train_adv_networks(trainer) -> list:
 
 
 def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):
+    import torch.optim.lr_scheduler as sched
+    scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
     total_loss = 0.0
     for _ in range(num_batches):
         data = buf.sample_streets(streets, batch_size)
         if data is None:
-            continue
+            scheduler.step(); continue
         features, values, iterations, masks = data
         weights = 2.0 * iterations / max(total_iters, 1)
 
@@ -68,7 +70,9 @@ def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters,
 
         pred  = net(x)
         loss  = ((pred - y) ** 2 * w.unsqueeze(1) * m).sum() / (m.sum() + 1e-8)
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        opt.step(); scheduler.step()
         total_loss += loss.item()
 
     return total_loss / num_batches
@@ -91,11 +95,13 @@ def train_strategy_nets(trainer, num_batches: int = None):
 
 
 def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_iters, device):
+    import torch.optim.lr_scheduler as sched
+    scheduler = sched.CosineAnnealingLR(opt, T_max=num_batches, eta_min=1e-5)
     total_loss = 0.0
     for b in range(num_batches):
         data = buf.sample_streets(streets, batch_size)
         if data is None:
-            continue
+            scheduler.step(); continue
         features, strategies, iterations, masks = data
         x = _to_device(features,   device)
         y = _to_device(strategies, device)
@@ -105,7 +111,9 @@ def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_i
         logits    = net(x)
         log_probs = torch.log_softmax(logits, dim=1)
         loss      = -(y * log_probs * m * w.unsqueeze(1)).sum() / (m.sum() + 1e-8)
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        opt.step(); scheduler.step()
         total_loss += loss.item()
 
         if (b + 1) % 100 == 0:

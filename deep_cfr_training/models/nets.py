@@ -19,25 +19,36 @@ import torch.nn as nn
 from game.constants import FEATURE_DIM, NUM_ACTIONS
 
 
-def _make_net(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
-    return nn.Sequential(
-        nn.Linear(input_dim, hidden_dim), nn.ReLU(),
-        nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-        nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-        nn.Linear(hidden_dim, output_dim),
-    )
+class _ResBlock(nn.Module):
+    """Single residual block: Linear → LayerNorm → ReLU → Linear → LayerNorm + skip."""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.ln1 = nn.LayerNorm(dim)
+        self.fc2 = nn.Linear(dim, dim)
+        self.ln2 = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        h = torch.relu(self.ln1(self.fc1(x)))
+        return torch.relu(self.ln2(self.fc2(h)) + x)
 
 
 class AdvantageNet(nn.Module):
     """Predicts per-action advantage values A(s, a)."""
 
     def __init__(self, input_dim: int = FEATURE_DIM,
-                 hidden_dim: int = 256, output_dim: int = NUM_ACTIONS):
+                 hidden_dim: int = 512, output_dim: int = NUM_ACTIONS):
         super().__init__()
-        self.net = _make_net(input_dim, hidden_dim, output_dim)
+        self.embed = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
+        self.res   = nn.Sequential(
+            _ResBlock(hidden_dim),
+            _ResBlock(hidden_dim),
+            _ResBlock(hidden_dim),
+        )
+        self.head  = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        return self.head(self.res(self.embed(x)))
 
     def get_strategy(self, features, valid_actions: list) -> dict:
         """Regret matching on predicted advantages → strategy dict."""
@@ -73,12 +84,18 @@ class StrategyNet(nn.Module):
     """
 
     def __init__(self, input_dim: int = FEATURE_DIM,
-                 hidden_dim: int = 256, output_dim: int = NUM_ACTIONS):
+                 hidden_dim: int = 512, output_dim: int = NUM_ACTIONS):
         super().__init__()
-        self.net = _make_net(input_dim, hidden_dim, output_dim)
+        self.embed = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
+        self.res   = nn.Sequential(
+            _ResBlock(hidden_dim),
+            _ResBlock(hidden_dim),
+            _ResBlock(hidden_dim),
+        )
+        self.head  = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        return self.head(self.res(self.embed(x)))
 
     def get_action_probs(self, features, valid_actions: list) -> dict:
         with torch.no_grad():

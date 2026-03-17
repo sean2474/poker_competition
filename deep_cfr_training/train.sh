@@ -8,10 +8,10 @@
 #   bash train.sh 50 200
 set -e
 
-ITERS=${1:-500}
+ITERS=${1:-1500}
 TRAVERSALS=${2:-2000}    # 32 vCPU: C++ OpenMP parallelizes batch_deal_discard
 BATCH_SIZE=${3:-131072}  # RTX 3090 24GB: 128K optimal (vs 65536 for smaller GPUs)
-TRAIN_BATCHES=${4:-100}  # 128K×100 = 12.8M samples/iter (4M buffer → 3× coverage)
+TRAIN_BATCHES=${4:-150}  # 128K×150 = 19.2M samples/iter (4M buffer → 4.8× coverage)
 BUFFER_SIZE=${5:-4000000} # 4M reservoir (125GB RAM can hold ~8GB of samples easily)
 
 cd "$(dirname "$0")"

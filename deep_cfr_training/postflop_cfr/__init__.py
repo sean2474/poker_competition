@@ -42,7 +42,7 @@ class DeepCFR:
       strategy_buffer   : strategy memories
     """
 
-    def __init__(self, lr: float = 1e-3, buffer_size: int = 2_000_000):
+    def __init__(self, lr: float = 3e-4, buffer_size: int = 2_000_000):
         self.lr     = lr
         self.device = DEVICE
 

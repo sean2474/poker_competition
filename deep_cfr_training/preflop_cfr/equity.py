@@ -11,7 +11,6 @@ substitute for the untrained postflop network.
 """
 
 import random
-import numpy as np
 
 _FULL_DECK = list(range(27))
 
