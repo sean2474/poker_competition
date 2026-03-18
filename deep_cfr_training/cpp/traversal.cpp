@@ -35,7 +35,7 @@ int c_evaluate_showdown(const int* p0_hand, const int* p1_hand, const int* commu
 void c_batch_deal_discard(int n, int* p0h, int* p1h, int* p0d, int* p1d,
                            int* comms, int* p0h5, int* p1h5,
                            unsigned int base_seed, float temperature) {
-    #pragma omp parallel for schedule(dynamic) if(n > 10)
+    #pragma omp parallel for schedule(dynamic) if(n > 2000)
     for (int i = 0; i < n; i++) {
         std::mt19937 rng(base_seed + (unsigned)i);
         int deck[DECK_SIZE]; shuffle_deck(deck, rng);
@@ -264,7 +264,7 @@ void c_build_discard_pair_features_batch(
     float* feats_A_pair_out,                     // [n*10*23]
     float* feats_B_pair_out                      // [n*10*23]
 ) {
-    #pragma omp parallel for schedule(static) if(n > 4)
+    #pragma omp parallel for schedule(static) if(n > 2000)
     for (int i = 0; i < n; i++) {
         const int* b3 = boards3 + i * 3;
         int board5[5] = {-1,-1,-1,-1,-1}, nb = 0;
@@ -283,7 +283,7 @@ void c_opp_cats_narrowed_batch(
     const int* opp_disc3s, // [n*3] Player A's discards (opp from B's view)
     float* cats_out        // [n*17] output
 ) {
-    #pragma omp parallel for schedule(static) if(n > 4)
+    #pragma omp parallel for schedule(static) if(n > 2000)
     for (int i = 0; i < n; i++) {
         const int* h5  = hand5s_B   + i * 5;
         const int* b3  = boards3    + i * 3;
@@ -327,7 +327,7 @@ void c_compute_postflop_ranges_batch(
     float* opp_ranges_out,  // [n*351]
     float* my_ranges_out    // [n*351]
 ) {
-    #pragma omp parallel for schedule(static) if(n > 4)
+    #pragma omp parallel for schedule(static) if(n > 2000)
     for (int i = 0; i < n; i++) {
         const int* tp_hand  = (tp == 0) ? (p0_hands + i*2) : (p1_hands + i*2);
         const int* opp_disc = (tp == 0) ? (p1_discs + i*3) : (p0_discs + i*3);
@@ -457,7 +457,7 @@ int c_postflop_collect_pending(PostflopGame* games, int n,
 void c_postflop_resume_batch(PostflopGame* games, const int* game_idxs,
                               const float* net_advs, int n_pending, unsigned int base_seed)
 {
-    #pragma omp parallel for schedule(dynamic) if(n_pending > 4)
+    #pragma omp parallel for schedule(dynamic) if(n_pending > 2000)
     for(int j=0;j<n_pending;j++){
         int i=game_idxs[j]; std::mt19937 rng(base_seed+(unsigned)i*997);
         advance_game(&games[i], net_advs+j*NUM_ACTIONS, &rng);
