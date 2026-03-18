@@ -253,7 +253,8 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
     adv_A_reshaped = adv_A.reshape(N, 10)
     pos_A = np.maximum(adv_A_reshaped, 0.)
     sums_A = pos_A.sum(axis=1, keepdims=True)
-    strat_A = np.where(sums_A > 0, pos_A / sums_A, 1./10)
+    safe_A = np.where(sums_A > 0, sums_A, 1.0)   # avoid 0/0 when all advantages negative
+    strat_A = np.where(sums_A > 0, pos_A / safe_A, 1./10)
     strat_A /= strat_A.sum(axis=1, keepdims=True)  # renorm for floating point
     # Sample using cumsum trick (vectorized, avoids Python loop)
     r_A = _rng.random((N,))
@@ -293,7 +294,8 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
     adv_B_reshaped = adv_B.reshape(N, 10)
     pos_B = np.maximum(adv_B_reshaped, 0.)
     sums_B = pos_B.sum(axis=1, keepdims=True)
-    strat_B = np.where(sums_B > 0, pos_B / sums_B, 1./10)
+    safe_B = np.where(sums_B > 0, sums_B, 1.0)   # avoid 0/0 when all advantages negative
+    strat_B = np.where(sums_B > 0, pos_B / safe_B, 1./10)
     strat_B /= strat_B.sum(axis=1, keepdims=True)
     r_B = _rng.random((N,))
     cumB = np.cumsum(strat_B.astype(np.float64), axis=1)
