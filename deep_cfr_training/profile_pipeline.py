@@ -11,11 +11,59 @@ Usage:
 Output: per-iteration CSV with all component timings + trend analysis.
 """
 
-import sys, os, time, csv, argparse
+import sys, os, time, csv, argparse, threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch
 import numpy as np
+
+try:
+    import psutil as _psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+
+
+class _UtilMonitor:
+    """Background thread that samples GPU + CPU utilization at 0.5s intervals."""
+
+    def __init__(self, interval: float = 0.5):
+        self.interval = interval
+        self._gpu   = []   # utilization %
+        self._cpu   = []   # percent across all cores
+        self._stop  = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._has_cuda = torch.cuda.is_available()
+        self._has_psutil = _HAS_PSUTIL
+
+    def start(self):
+        self._gpu.clear(); self._cpu.clear()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    def _loop(self):
+        while not self._stop.is_set():
+            if self._has_cuda:
+                try:
+                    self._gpu.append(torch.cuda.utilization())
+                except Exception:
+                    pass
+            if self._has_psutil:
+                self._cpu.append(_psutil.cpu_percent(interval=None))
+            self._stop.wait(self.interval)
+
+    def stats(self):
+        """Returns (gpu_avg, gpu_peak, cpu_avg, cpu_peak) or None for missing."""
+        gpu_avg  = float(np.mean(self._gpu))  if self._gpu  else 0.
+        gpu_peak = float(np.max(self._gpu))   if self._gpu  else 0.
+        cpu_avg  = float(np.mean(self._cpu))  if self._cpu  else 0.
+        cpu_peak = float(np.max(self._cpu))   if self._cpu  else 0.
+        return gpu_avg, gpu_peak, cpu_avg, cpu_peak
 
 from deep_cfr import DeepCFR
 from training_phase.runner import PhaseRunner
@@ -141,6 +189,8 @@ class PipelineProfiler:
                     adv_bufs=tmp_adv[thread_idx], str_buf=tmp_str[thread_idx],
                 )
 
+            _mon = _UtilMonitor(interval=0.5)
+            _mon.start()
             t0 = time.time()
             threads = []
             for tp in range(2):
@@ -149,6 +199,8 @@ class PipelineProfiler:
             for th in threads: th.start()
             for th in threads: th.join()
             t_trav = time.time() - t0
+            _mon.stop()
+            gpu_avg, gpu_peak, cpu_avg, cpu_peak = _mon.stats()
 
             t0 = time.time()
             for idx in range(tot_th):
@@ -216,6 +268,10 @@ class PipelineProfiler:
                 'is_ready':    _postflop_ready(trainer),
                 'dloss':       dloss,
                 'pf_infosets': len(pf_ss),
+                'gpu_avg':     gpu_avg,
+                'gpu_peak':    gpu_peak,
+                'cpu_avg':     cpu_avg,
+                'cpu_peak':    cpu_peak,
             })
             self.records.append(rec)
 
@@ -229,6 +285,8 @@ class PipelineProfiler:
                   f"  {t_total:>7.2f}"
                   f"  {buf_min_new:>8d}"
                   f"  {str(_postflop_ready(trainer)):>8}")
+            print(f"       GPU: avg={gpu_avg:4.0f}%  peak={gpu_peak:4.0f}%"
+                  f"   CPU: avg={cpu_avg:5.1f}%  peak={cpu_peak:5.1f}%")
             if phase_idx == 2 and any(v[0] > 0.001 for v in _p3_timers.values()):
                 rc = _p3_timers['recompute'][0]; ri = _p3_timers['run_iter'][0]
                 rf = _p3_timers['range_feat'][0]
@@ -287,6 +345,16 @@ class PipelineProfiler:
         avg_last = np.mean([r['t_total'] for r in last10])
         print(f"\n  Steady-state iter time (last {len(last10)}): {avg_last:.2f}s")
         print(f"  Projected 1500 iters: {avg_last*1500:.0f}s = {avg_last*1500/3600:.1f}h")
+
+        # GPU/CPU utilization summary
+        all_gpu_avg  = [r.get('gpu_avg',  0) for r in self.records]
+        all_gpu_peak = [r.get('gpu_peak', 0) for r in self.records]
+        all_cpu_avg  = [r.get('cpu_avg',  0) for r in self.records]
+        all_cpu_peak = [r.get('cpu_peak', 0) for r in self.records]
+        if any(v > 0 for v in all_gpu_avg) or any(v > 0 for v in all_cpu_avg):
+            print(f"\n  Utilization (during traversal):")
+            print(f"    GPU  avg={np.mean(all_gpu_avg):5.1f}%  peak={np.max(all_gpu_peak):5.1f}%")
+            print(f"    CPU  avg={np.mean(all_cpu_avg):5.1f}%  peak={np.max(all_cpu_peak):5.1f}%")
 
         # Save CSV
         csv_path = os.path.join(os.path.dirname(__file__), 'profile_results.csv')
