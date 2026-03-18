@@ -1,34 +1,36 @@
 #!/bin/bash
 # Deep CFR Training Script
-# Usage: bash train.sh [iterations] [traversals]
 #
-# RTX 3090 (24GB VRAM) + 32 vCPU + 125GB RAM:
-#   bash train.sh 500 2000
-# Local (MPS/CPU):
-#   bash train.sh 50 200
+# RunPod H100 SXM5 (80GB) + 16+ vCPU:
+#   bash train.sh 1500 1000 131072 50
+# Local macOS (MPS):
+#   bash train.sh 50 200 4096 5
 set -e
 
 ITERS=${1:-1500}
-TRAVERSALS=${2:-2000}    # 32 vCPU: C++ OpenMP parallelizes batch_deal_discard
-BATCH_SIZE=${3:-131072}  # RTX 3090 24GB: 128K optimal (vs 65536 for smaller GPUs)
-TRAIN_BATCHES=${4:-150}  # 128K×150 = 19.2M samples/iter (4M buffer → 4.8× coverage)
-BUFFER_SIZE=${5:-4000000} # 4M reservoir (125GB RAM can hold ~8GB of samples easily)
+TRAVERSALS=${2:-1000}
+BATCH_SIZE=${3:-65536}
+TRAIN_BATCHES=${4:-50}
+DISC_GAMES=${5:-50}
 
 cd "$(dirname "$0")"
 
 # 1. Build C++ acceleration library
+# rangefinder.cpp is now in range/ subdirectory
 echo "=== Building C++ library ==="
 cd cpp
 if [[ "$(uname)" == "Darwin" ]]; then
-    g++ -O3 -shared -fPIC -std=c++17 -o libtraversal.dylib traversal.cpp -lpthread
+    clang++ -O3 -shared -fPIC -std=c++17 \
+        -o libtraversal.dylib \
+        traversal.cpp range/rangefinder.cpp \
+        -lpthread
     echo "Built libtraversal.dylib"
-    g++ -O3 -shared -fPIC -std=c++17 -o librangefinder.dylib rangefinder.cpp -lpthread
-    echo "Built librangefinder.dylib"
 else
-    g++ -O3 -shared -fPIC -std=c++17 -o libtraversal.so traversal.cpp -lpthread -fopenmp
+    g++ -O3 -shared -fPIC -std=c++17 -fopenmp \
+        -o libtraversal.so \
+        traversal.cpp range/rangefinder.cpp \
+        -lpthread
     echo "Built libtraversal.so"
-    g++ -O3 -shared -fPIC -std=c++17 -o librangefinder.so rangefinder.cpp -lpthread
-    echo "Built librangefinder.so"
 fi
 cd ..
 
@@ -38,18 +40,19 @@ pip install torch tqdm numpy --quiet 2>/dev/null || true
 # 3. Run training
 echo ""
 echo "=== Starting Deep CFR Training ==="
-echo "Iterations: $ITERS, Traversals: $TRAVERSALS"
-echo "Batch size: $BATCH_SIZE, Train batches: $TRAIN_BATCHES"
+echo "  Iters=$ITERS  Traversals=$TRAVERSALS  BatchSize=$BATCH_SIZE"
+echo "  TrainBatches=$TRAIN_BATCHES  DiscardGames=$DISC_GAMES"
 echo ""
 
-python run.py \
-    --iterations    "$ITERS"        \
-    --traversals    "$TRAVERSALS"   \
-    --batch-size    "$BATCH_SIZE"   \
+python trainer.py \
+    --iterations    "$ITERS"         \
+    --traversals    "$TRAVERSALS"    \
+    --batch-size    "$BATCH_SIZE"    \
     --train-batches "$TRAIN_BATCHES" \
-    --buffer-size   "$BUFFER_SIZE"
+    --discard-n-games "$DISC_GAMES"  \
+    --checkpoint-every 50            \
+    --output model/deep_cfr
 
 echo ""
 echo "=== Training Complete ==="
-echo "Model saved to: model/deep_cfr_strategy.pt"
-ls -lh model/deep_cfr*.pt 2>/dev/null || true
+ls -lh model/deep_cfr*.pt model/deep_cfr*.pkl 2>/dev/null || true
