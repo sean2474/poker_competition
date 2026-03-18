@@ -335,7 +335,10 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
     # Phase 3 ALWAYS uses neural mode (bootstraps from empty buffers).
     # Phase 1/2 use warmup unless buffers are pre-filled.
     is_warmup = is_warmup and (phase < 3)
-    game_states = {} if phase >= 3 else None   # Phase 3: per-game range tracker
+    # Range tracker disabled: apply_range_features was 65-70% of H100 traversal time
+    # C++ already provides discard-based range in features[17-50]. Heuristic sigmoid
+    # betting updates added noise without sufficient benefit. Re-enable when optimized.
+    game_states = None
     if is_warmup:
         while pending:
             _warmup_round(trainer, gens, pending, traversing_player)
