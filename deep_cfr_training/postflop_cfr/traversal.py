@@ -236,19 +236,27 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
     brs = np.where(boards3 >= 0, boards3 % 9 / 8., 0.).astype(np.float32)  # [N,3]
     brs_rep = np.repeat(brs, 10, axis=0)   # [N*10, 3]
 
-    # ── Step 3: build feats_A with uniform opp context ────────────────────────
-    feats_A = np.empty((N * 10, FDIM), dtype=np.float32)
-    feats_A[:, :PDIM] = pair_A
-    feats_A[:, PDIM:PDIM+3]  = brs_rep
-    feats_A[:, PDIM+3:PDIM+20] = 1.0 / 17  # uniform opp cats
-    feats_A[:, PDIM+20] = 0.              # is_bb=False for player A
+    # ── Step 3: build ctx for A (uniform opp cats — no dependency on B) ────────
+    ctx_A = np.empty((N * 10, CTX_DIM), dtype=np.float32)
+    ctx_A[:, :3]   = brs_rep
+    ctx_A[:, 3:20] = 1.0 / 17   # uniform opp cats
+    ctx_A[:, 20]   = 0.          # is_bb=False for player A
 
-    # ── Step 4: DiscardNet forward for Player A (GPU direct) ───────────────
+    # ── Step 4: NNUE pair embeddings for A and B in ONE GPU call ──────────────
+    # pair_layer is linear → pair_layer(concat(A,B)) = [pair_layer(A), pair_layer(B)]
+    # Mathematically identical, reduces kernel launches and uses larger batch.
     _dnet = discard_trainer.net
     _ddev = next(_dnet.parameters()).device
     _dnet.eval()
+    pair_AB = np.concatenate([pair_A, pair_B], axis=0)   # (2*N*10, PDIM)
     with torch.no_grad():
-        adv_A = _dnet(torch.from_numpy(feats_A).to(_ddev)).cpu().numpy()   # (N*10,)
+        pair_AB_t   = torch.from_numpy(pair_AB).to(_ddev)
+        pair_emb_AB = _dnet.pair_layer(pair_AB_t)        # (2*N*10, h)
+        pair_emb_A  = pair_emb_AB[:N * 10]               # (N*10, h)
+        pair_emb_B  = pair_emb_AB[N * 10:]               # (N*10, h)
+
+        ctx_emb_A = _dnet.ctx_layer(torch.from_numpy(ctx_A).to(_ddev))   # (N*10, h)
+        adv_A = _dnet.output(pair_emb_A + ctx_emb_A).squeeze(-1).cpu().numpy()  # (N*10,)
 
     # ── Step 5: sample Player A discards (vectorized) ─────────────────────────
     adv_A_reshaped = adv_A.reshape(N, 10)
@@ -280,16 +288,16 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
     )
     opp_cats_B_rep = np.repeat(opp_cats_B, 10, axis=0)  # [N*10, 17]
 
-    # ── Step 7: build feats_B with actual opp context ─────────────────────────
-    feats_B = np.empty((N * 10, FDIM), dtype=np.float32)
-    feats_B[:, :PDIM] = pair_B
-    feats_B[:, PDIM:PDIM+3]   = brs_rep
-    feats_B[:, PDIM+3:PDIM+20] = opp_cats_B_rep
-    feats_B[:, PDIM+20] = 1.              # is_bb=True for player B
+    # ── Step 7: build ctx for B with actual narrowed opp context ───────────────
+    ctx_B = np.empty((N * 10, CTX_DIM), dtype=np.float32)
+    ctx_B[:, :3]   = brs_rep
+    ctx_B[:, 3:20] = opp_cats_B_rep
+    ctx_B[:, 20]   = 1.          # is_bb=True for player B
 
-    # ── Step 8: DiscardNet forward for Player B ────────────────────────────────
+    # ── Step 8: Player B forward using pre-computed pair_emb_B (NNUE) ─────────
     with torch.no_grad():
-        adv_B = _dnet(torch.from_numpy(feats_B).to(_ddev)).cpu().numpy()   # (N*10,)
+        ctx_emb_B = _dnet.ctx_layer(torch.from_numpy(ctx_B).to(_ddev))   # (N*10, h)
+        adv_B = _dnet.output(pair_emb_B + ctx_emb_B).squeeze(-1).cpu().numpy()  # (N*10,)
 
     # ── Step 9: sample Player B discards (vectorized) ─────────────────────────
     adv_B_reshaped = adv_B.reshape(N, 10)

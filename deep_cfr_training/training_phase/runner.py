@@ -181,10 +181,8 @@ class PhaseRunner:
             # Phase 3: discard trains jointly with postflop
             in_phase2 = (self._phase_idx == 1)
             in_phase3 = (self._phase_idx == 2)
-            # Always None: use heuristic discard during DFS traversal.
-            # Discard CFR trains separately via run_iter (below), avoiding
-            # GPU inference inside each DFS round which causes growing slowdown.
-            dt_for_traversal = None
+            dt_for_traversal = (self.state.discard_trainer
+                                if in_phase3 else None)
 
             if in_phase2:
                 phase2_local += 1
@@ -218,36 +216,56 @@ class PhaseRunner:
                 for j in range(n_threads):
                     idx = tp * n_threads + j
                     threads.append(threading.Thread(target=_run_trav, args=(idx, tp)))
+            _t_trav = time.time()
             for th in threads: th.start()
             for th in threads: th.join()
+            _dt_trav = time.time() - _t_trav
 
             # Merge all temp buffers → real trainer buffers (sequential, safe)
+            _t_merge = time.time()
             for idx in range(total_threads):
                 for p in range(2):
                     self.state.adv_buffers[p].merge_from(tmp_adv[idx][p])
                 self.state.strategy_buffer.merge_from(tmp_str[idx])
+            _dt_merge = time.time() - _t_merge
             inner.refresh()
 
             # ── Discard sample collection (Phase 2 + Phase 3) ────────────────
-            # Single call after all traversal threads: avoids n_trav_threads×2 concurrent
-            # CPU run_iters. Uses a fresh batch for efficient GPU inference.
+            _dt_disc_iter = 0.0
             if in_phase2 or in_phase3:
                 n_disc = self.discard_n_games * max(1, self.n_trav_threads)
                 _, _, _, _, comms_d, p0h5_d, p1h5_d = batch_deal_discard(n_disc)
+                _t_di = time.time()
                 self.state.discard_trainer.run_iter(p0h5_d, p1h5_d, comms_d)
+                _dt_disc_iter = time.time() - _t_di
 
-            # ── Training ────────────────────────────────────────────────
+            # ── Training ────────────────────────────────────────────
+            _dt_pf_train = 0.0
+            _dt_disc_train = 0.0
             if (t + 1) % self.train_interval == 0:
                 inner.set_description('Train')
+                _t_tr = time.time()
                 losses = self.postflop_cfr.train()
+                _dt_pf_train = time.time() - _t_tr
 
                 if in_phase2 or in_phase3:
                     dt = self.state.discard_trainer
                     if len(dt.buf) >= dt.batch_size:
+                        _t_dtr = time.time()
                         discard_loss = dt.train()
+                        _dt_disc_train = time.time() - _t_dtr
                         losses.append(discard_loss)
 
                 inner.refresh()
+
+            # ── Timing breakdown (every 10 iters) ─────────────────────────────
+            if (t + 1) % 10 == 0 and in_phase3:
+                tqdm.write(
+                    f'  [t={t+1}] trav={_dt_trav:.1f}s  merge={_dt_merge:.2f}s'
+                    f'  disc_iter={_dt_disc_iter:.2f}s'
+                    f'  pf_train={_dt_pf_train:.1f}s  disc_train={_dt_disc_train:.2f}s'
+                    f'  total={_dt_trav+_dt_merge+_dt_disc_iter+_dt_pf_train+_dt_disc_train:.1f}s'
+                )
 
             # ── Progress bar ───────────────────────────────────────────────
             elapsed = time.time() - t0
