@@ -137,6 +137,10 @@ class PhaseRunner:
         discard_loss = 0.0
         phase2_local = 0   # iteration counter within Phase 2
 
+        # ── Phase timing ───────────────────────────────────────────────────
+        _phase_t0    = time.time()
+        _phase_iters = 0
+
         _bar = '{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
         pbar  = tqdm(range(start_iter, self.num_iterations), desc='CFR',
                      initial=start_iter, total=self.num_iterations,
@@ -156,8 +160,18 @@ class PhaseRunner:
                 discard_loss = discard_loss,
             )
             if self._current_phase.is_complete(stats):
+                _phase_dt = time.time() - _phase_t0
+                _s_per_it = _phase_dt / max(_phase_iters, 1)
                 tqdm.write(f'\n  {self._current_phase.summary(stats)}')
+                tqdm.write(
+                    f'  [timing] {self._current_phase.name}: '
+                    f'{_phase_iters} iters  {_phase_dt:.1f}s total  '
+                    f'{_s_per_it:.2f}s/iter'
+                )
                 self._advance_phase()
+                _phase_t0    = time.time()
+                _phase_iters = 0
+            _phase_iters += 1
 
             # ── Determine active models ────────────────────────────────────
             # Phase 1: no discard training
@@ -256,6 +270,13 @@ class PhaseRunner:
                 return
 
         inner.close()
+        _phase_dt = time.time() - _phase_t0
+        _s_per_it = _phase_dt / max(_phase_iters, 1)
+        tqdm.write(
+            f'\n  [timing] {self._current_phase.name}: '
+            f'{_phase_iters} iters  {_phase_dt:.1f}s total  '
+            f'{_s_per_it:.2f}s/iter'
+        )
         tqdm.write('\nTraining strategy networks...')
         self.postflop_cfr.train_strategy(
             num_batches=self.num_batches * 3)
