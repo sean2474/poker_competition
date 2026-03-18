@@ -67,7 +67,7 @@ python trainer.py \
     --discard-n-games "$DISC_GAMES"     \
     --n-trav-threads  "$N_TRAV_THREADS" \
     --buffer-size     "$BUFFER_SIZE"    \
-    --checkpoint-every 300              \ 
+    --checkpoint-every 300              \
     --output model/deep_cfr
 
 echo ""
