@@ -103,6 +103,33 @@ class PipelineProfiler:
                        for _ in range(2)]
             tmp_str = [ReservoirBuffer(buf_cap) for _ in range(2)]
 
+            # ── Phase 3: monkey-patch sub-component timers ────────────────
+            _p3_timers = {'recompute': [0.], 'run_iter': [0.],
+                          'range_feat': [0.], 'pure_cpp': [0.]}
+            if phase_idx == 2:
+                from postflop_cfr import traversal as _t
+                _orig_recompute = _t._recompute_discards_with_cfr
+                _orig_apply     = None
+                try:
+                    import postflop_cfr.range_tracker as _rt
+                    _orig_apply = _rt.apply_range_features
+                    def _timed_apply(feats, infos, gstates):
+                        t = time.time(); r = _orig_apply(feats, infos, gstates)
+                        _p3_timers['range_feat'][0] += time.time()-t; return r
+                    _rt.apply_range_features = _timed_apply
+                except Exception: pass
+
+                def _timed_recompute(p0h5, p1h5, comms, dt):
+                    t = time.time(); r = _orig_recompute(p0h5, p1h5, comms, dt)
+                    _p3_timers['recompute'][0] += time.time()-t; return r
+                _t._recompute_discards_with_cfr = _timed_recompute
+
+                _orig_run_iter = dc.run_iter
+                def _timed_ri(h5A, h5B, b):
+                    t = time.time(); _orig_run_iter(h5A, h5B, b)
+                    _p3_timers['run_iter'][0] += time.time()-t
+                dc.run_iter = _timed_ri
+
             def _run_tp(tp):
                 run_traversals_batched(
                     trainer, self.traversals, tp,
@@ -123,9 +150,24 @@ class PipelineProfiler:
                 trainer.strategy_buffer.merge_from(tmp_str[tp])
             t_merge = time.time() - t0
 
-            # Record per-player timing separately (Phase 2 runs sequentially)
+            # ── Restore Phase 3 monkey-patches ────────────────────────────────
+            if phase_idx == 2:
+                from postflop_cfr import traversal as _t
+                _t._recompute_discards_with_cfr = _orig_recompute
+                dc.run_iter = _orig_run_iter
+                if _orig_apply is not None:
+                    import postflop_cfr.range_tracker as _rt
+                    _rt.apply_range_features = _orig_apply
+
+            # Record per-player timing separately
             rec['t_trav_parallel'] = t_trav
             rec['t_merge']         = t_merge
+            rec['p3_recompute']    = _p3_timers['recompute'][0]
+            rec['p3_run_iter']     = _p3_timers['run_iter'][0]
+            rec['p3_range_feat']   = _p3_timers['range_feat'][0]
+            rec['p3_pure_cpp']     = max(0., t_trav - _p3_timers['recompute'][0]
+                                         - _p3_timers['run_iter'][0]
+                                         - _p3_timers['range_feat'][0])
 
             # ── Discard MC (Phase 2 standalone) ─────────────────────────────
             t_disc_mc = 0.
@@ -170,7 +212,7 @@ class PipelineProfiler:
 
             # Print live row
             print(f"{it:>4}  {'P'+str(phase_idx+1):>5}"
-                  f"  {t_trav/2:>7.2f} {t_trav/2:>7.2f}"   # approx per-player
+                  f"  {t_trav/2:>7.2f} {t_trav/2:>7.2f}"
                   f"  {t_disc_mc:>7.3f}"
                   f"  {t_adv_train:>7.3f}"
                   f"  {t_disc_tr:>6.3f}"
@@ -178,6 +220,12 @@ class PipelineProfiler:
                   f"  {t_total:>7.2f}"
                   f"  {buf_min_new:>8d}"
                   f"  {str(_postflop_ready(trainer)):>8}")
+            if phase_idx == 2 and any(v[0] > 0.001 for v in _p3_timers.values()):
+                rc = _p3_timers['recompute'][0]; ri = _p3_timers['run_iter'][0]
+                rf = _p3_timers['range_feat'][0]
+                pc = max(0., t_trav - rc - ri - rf)
+                print(f"       P3-breakdown:  recompute={rc:.2f}s  run_iter={ri:.2f}s"
+                      f"  range_feat={rf:.2f}s  C++/GPU={pc:.2f}s")
 
         self._summarise()
 
