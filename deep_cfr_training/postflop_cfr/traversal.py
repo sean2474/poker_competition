@@ -244,10 +244,11 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
         feats_B[i*10:(i+1)*10, PAIR_DIM:] = ctx_B
 
     # ── Batch forward: Player A ───────────────────────────────────────────────
-    net    = discard_trainer.net
-    device = next(net.parameters()).device
+    # Thread-safe: deepcopy net to CPU so run_iter's net.cpu() can't corrupt us
+    import copy
+    net = copy.deepcopy(discard_trainer.net).cpu().eval()
     with torch.no_grad():
-        adv_A = net(torch.from_numpy(feats_A).to(device)).cpu().numpy()  # (N*10,)
+        adv_A = net(torch.from_numpy(feats_A).float()).numpy()  # (N*10,) on CPU
 
     for i in range(N):
         h5A  = list(p0h5[i])
@@ -268,9 +269,9 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
         ctx_B = np.concatenate([brs, oc_B, [1.]])
         feats_B[i*10:(i+1)*10, PAIR_DIM:] = ctx_B
 
-    # ── Batch forward: Player B ───────────────────────────────────────────────
+    # ── Batch forward: Player B (use same CPU net copy) ──────────────────────
     with torch.no_grad():
-        adv_B = net(torch.from_numpy(feats_B).to(device)).cpu().numpy()
+        adv_B = net(torch.from_numpy(feats_B).float()).numpy()
 
     for i in range(N):
         h5B  = list(p1h5[i])
