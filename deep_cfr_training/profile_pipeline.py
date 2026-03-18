@@ -30,7 +30,7 @@ class PipelineProfiler:
 
     def __init__(self, n_iter: int = 30, traversals: int = 1000,
                  discard_n_games: int = 50, batch_size: int = 65536,
-                 num_batches: int = 50):
+                 num_batches: int = 50, force_phase: int = 1):
         self.trainer = DeepCFR()
         self.records = []        # list of dicts, one per iteration
         self.n_iter  = n_iter
@@ -38,6 +38,7 @@ class PipelineProfiler:
         self.discard_n_games = discard_n_games
         self.batch_size  = batch_size
         self.num_batches = num_batches
+        self.force_phase = force_phase
 
     def run(self):
         import threading
@@ -52,17 +53,25 @@ class PipelineProfiler:
         trainer = self.trainer
         dc      = DiscardCFR()
 
-        phase_idx  = 0
-        phases     = [Phase1(), Phase2(), Phase3()]
-        discard_model = None    # Phase1: heuristic
-        pf_history = []
+        # If force_phase > 1, skip directly to that phase
+        # (bypasses phase transition checks — for profiling Phase 2/3 directly)
+        phase_idx     = max(0, self.force_phase - 1)
+        phases        = [Phase1(), Phase2(), Phase3()]
+        discard_model = dc if self.force_phase >= 2 else None
+        pf_history    = []
+        print(f"  Starting at Phase {phase_idx + 1}")
+        if self.force_phase >= 2:
+            print(f"  Force-seeding preflop regrets to skip Phase 1 check...")
+            trainer.preflop_strategy_sum['FORCE'] = np.ones(3) * 9999.
 
         print(f"{'Iter':>4}  {'Phase':>5}  {'trav0':>7} {'trav1':>7}"
               f"  {'disc_mc':>7}  {'adv_tr':>7}  {'disc_tr':>6}"
               f"  {'merge':>6}  {'total':>7}  {'buf_min':>8}  {'is_ready':>8}")
         print("-" * 95)
 
+        trainer = self.trainer
         for it in range(1, self.n_iter + 1):
+            trainer.iteration = it  # enables linear strategy sum weighting
             t_iter_start = time.time()
             rec = {'iter': it, 'phase': phase_idx + 1}
 
@@ -241,6 +250,8 @@ if __name__ == '__main__':
     parser.add_argument('--disc-games',  type=int, default=50)
     parser.add_argument('--batch-size',  type=int, default=65536)
     parser.add_argument('--num-batches', type=int, default=50)
+    parser.add_argument('--force-phase', type=int, default=1,
+                        help='Start at Phase N directly (skip earlier phases)')
     args = parser.parse_args()
 
     print(f"\nReal-pipeline profiler: {args.iterations} iters × {args.traversals} traversals")
@@ -252,5 +263,6 @@ if __name__ == '__main__':
         discard_n_games=args.disc_games,
         batch_size=args.batch_size,
         num_batches=args.num_batches,
+        force_phase=args.force_phase,
     )
     prof.run()
