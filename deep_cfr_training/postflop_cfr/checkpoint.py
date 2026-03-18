@@ -72,7 +72,11 @@ def save_checkpoint(trainer, path, iteration, save_buffers=False):
 def load_checkpoint(trainer, path) -> int:
     if not os.path.exists(path):
         return 0
-    ckpt = torch.load(path, map_location='cpu')
+    try:
+        ckpt = torch.load(path, map_location='cpu')
+    except (EOFError, RuntimeError, pickle.UnpicklingError) as e:
+        print(f'[ckpt] Corrupted checkpoint {path} ({e}), starting fresh.')
+        return 0
     trainer.adv_nets[0].load_state_dict(ckpt['adv_net_0'])
     trainer.adv_nets[1].load_state_dict(ckpt['adv_net_1'])
     trainer.strategy_net.load_state_dict(ckpt['strategy_net'])
@@ -87,10 +91,13 @@ def load_checkpoint(trainer, path) -> int:
     trainer.total_iterations = ckpt.get('total_iterations', trainer.total_iterations)
     pf_path = path + '.preflop.pkl'
     if os.path.exists(pf_path):
-        with open(pf_path, 'rb') as f:
-            pf = pickle.load(f)
-        trainer.preflop_regrets      = pf.get('regrets', {})
-        trainer.preflop_strategy_sum = pf.get('strategy_sum', {})
+        try:
+            with open(pf_path, 'rb') as f:
+                pf = pickle.load(f)
+            trainer.preflop_regrets      = pf.get('regrets', {})
+            trainer.preflop_strategy_sum = pf.get('strategy_sum', {})
+        except (EOFError, pickle.UnpicklingError) as e:
+            print(f'[ckpt] Corrupted preflop pkl ({e}), resetting preflop.')
     device = trainer.device
     for net in trainer.adv_nets:
         net.to(device)
