@@ -134,34 +134,6 @@ def compute_blocker_flags(c0: int, c1: int, board: list, n_board: int) -> np.nda
     return out
 
 
-# ── Fast discard score (mirrors heuristic/discard.h::fast_score) ─────────────
-
-def fast_score(c0: int, c1: int, board3: list) -> float:
-    r0, r1 = card_rank(c0), card_rank(c1)
-    s0, s1 = card_suit(c0), card_suit(c1)
-    sc = 0.
-    if r0 == r1: sc += 10.
-    sc += max(r0, r1) * 0.5
-    if s0 == s1: sc += 3.
-    for b in board3:
-        if b < 0: continue
-        br, bs = card_rank(b), card_suit(b)
-        if br == r0 or br == r1: sc += 5.
-        if abs(br - r0) <= 1 or abs(br - r1) <= 1: sc += 1.
-        if bs == s0 and s0 == s1: sc += 2.
-    return sc
-
-
-def best_discard_keep(hand5: list, board3: list) -> tuple:
-    """Return (ki, kj) indices 0-4 of best 2 cards to keep."""
-    best, best_s = (0, 1), -1e9
-    for ki, kj in KEEP_PAIRS:
-        s = fast_score(hand5[ki], hand5[kj], board3)
-        if s > best_s:
-            best_s, best = s, (ki, kj)
-    return best
-
-
 # ── Range estimation (pure Python Bayesian, mirrors c_range_* functions) ──────
 
 def _range_uniform(dead_cards: list) -> np.ndarray:
@@ -218,11 +190,29 @@ def opp_range_cats(hand2: list, opp_disc: list, board: list, n_board: int) -> np
 
 
 def my_cat_onehot(c0: int, c1: int, board: list, n_board: int) -> np.ndarray:
-    """17-dim one-hot for my actual hand category."""
-    cat = classify_hand(c0, c1, (list(board[:n_board]) + [-1]*5)[:5], n_board)
-    out = np.zeros(N_CATS, dtype=np.float32)
-    out[cat] = 1.
-    return out
+    """
+    17-dim category distribution matching C++ _my_cat_features.
+
+    C++ computes: c_range_init(dead=[c0,c1]) → c_range_remove_cards(community)
+    → c_range_update_action(ap=[1e-6 everywhere, 1.0 at pair(c0,c1)])
+    Because pair(c0,c1) has range=0 (excluded by c_range_init), the 1.0 weight
+    collapses to 0 and all surviving hands retain their 1e-6 weight → uniform
+    distribution over pairs NOT containing c0, c1, or any community card.
+    c_range_to_category_probs then converts this to a 17-dim category distribution.
+    """
+    b5   = (list(board[:n_board]) + [-1] * 5)[:5]
+    dead = set()
+    dead.add(c0); dead.add(c1)
+    for i in range(n_board):
+        if board[i] >= 0:
+            dead.add(board[i])
+    cats = np.zeros(N_CATS, dtype=np.float32)
+    for a, b in _ALL_PAIRS:
+        if a in dead or b in dead:
+            continue
+        cats[classify_hand(a, b, b5, n_board)] += 1.0
+    s = cats.sum()
+    return cats / s if s > 0 else np.ones(N_CATS, dtype=np.float32) / N_CATS
 
 
 # ── Board texture (mirrors cfr/features.h board_texture block) ───────────────
@@ -275,8 +265,9 @@ def state_to_features(
     f   = np.zeros(FEATURE_DIM, dtype=np.float32)
     c0, c1  = hand2[0], hand2[1]
     n_comm  = sum(1 for c in board if c >= 0)
-    pot     = max(my_bet + opp_bet, 1)
-    fpot    = float(pot)
+    _pot_raw = my_bet + opp_bet
+    pot      = max(_pot_raw, 1)
+    fpot     = float(pot)
 
     # [0-16] my_cat
     f[0:17]  = my_cat_onehot(c0, c1, board, n_comm)
@@ -315,7 +306,7 @@ def state_to_features(
     # [76] position
     f[76] = 1. if is_bb else 0.
 
-    # [77] pot / MAX_BET
-    f[77] = min(pot / float(MAX_BET), 1.0)
+    # [77] pot / MAX_BET  (raw pot, not clamped — matches C++ features.h)
+    f[77] = min(_pot_raw / float(MAX_BET), 1.0)
 
     return f
