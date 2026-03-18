@@ -2,15 +2,15 @@
  * C++ traversal engine for Deep CFR — C exports for Python ctypes.
  *
  * Build (Linux/RunPod):
- *   g++ -O3 -shared -fPIC -std=c++17 -fopenmp -o libtraversal.so traversal.cpp -lpthread
+ *   g++ -O3 -shared -fPIC -std=c++17 -fopenmp -o libtraversal.so traversal.cpp range/rangefinder.cpp -lpthread
  * Build (macOS):
- *   clang++ -O3 -shared -fPIC -std=c++17 -o libtraversal.dylib traversal.cpp -lpthread
+ *   clang++ -O3 -shared -fPIC -std=c++17 -o libtraversal.dylib traversal.cpp range/rangefinder.cpp -lpthread
  */
 
 #include <cstring>
 #include <random>
 #include <vector>
-#include "traversal_engine.h"   // PostflopGame, advance_game (→ features.h, discard.h, constants.h)
+#include "cfr/traversal_engine.h"   // PostflopGame, advance_game (→ cfr/features.h, heuristic/discard.h, core/constants.h)
 
 extern "C" {
 
@@ -51,28 +51,69 @@ void c_batch_deal_discard(int n, int* p0h, int* p1h, int* p0d, int* p1d,
     }
 }
 
+// ── Hand category (for Python-side range update) ─────────────────────────────
+
+int c_classify_hand(int c0, int c1, const int* board, int n_board) {
+    return classify_hand(c0, c1, board, n_board);
+}
+
+void c_blocker_flags(int c0, int c1, const int* board, int n_board, float* out) {
+    compute_blocker_flags(c0, c1, board, n_board, out);
+}
+
+// ── Per-pending-game raw state (Phase 3 range tracking) ───────────────────────
+// Must be called immediately after c_postflop_collect_pending.
+// Returns the same count in the same order.
+int c_postflop_get_pending_game_info(
+    PostflopGame* games, int n_games,
+    int* hero_hand_out,  // [cnt * 2]  current player's 2-card hand
+    int* community_out,  // [cnt * 5]  full community (fill unused with -1)
+    int* my_disc_out,    // [cnt * 3]  current player's discards
+    int* opp_disc_out,   // [cnt * 3]  opponent's discards
+    int* cp_out,         // [cnt]      current player index (0 or 1)
+    int* bet_cp_out,     // [cnt]      current player's chips bet
+    int* bet_opp_out,    // [cnt]      opponent's chips bet
+    int* game_idx_out    // [cnt]      game index within batch
+) {
+    int cnt = 0;
+    for (int i = 0; i < n_games; i++) {
+        PostflopGame& g = games[i];
+        if (!g.waiting || g.done) continue;
+        int cp = g.pending_player;
+        FullGameState& s = g.stack[g.depth > 0 ? g.depth - 1 : 0].state;
+        int* hero = (cp == 0) ? g.p0_hand : g.p1_hand;
+        int* my_d = (cp == 0) ? g.p0_disc : g.p1_disc;
+        int* op_d = (cp == 0) ? g.p1_disc : g.p0_disc;
+        for (int j = 0; j < 2; j++) hero_hand_out[cnt*2+j] = hero[j];
+        for (int j = 0; j < 5; j++) community_out[cnt*5+j] = g.community[j];
+        for (int j = 0; j < 3; j++) my_disc_out[cnt*3+j]   = my_d[j];
+        for (int j = 0; j < 3; j++) opp_disc_out[cnt*3+j]  = op_d[j];
+        cp_out[cnt]       = cp;
+        bet_cp_out[cnt]   = s.bets[cp];
+        bet_opp_out[cnt]  = s.bets[1 - cp];
+        game_idx_out[cnt] = i;
+        cnt++;
+    }
+    return cnt;
+}
+
 // ── Feature extraction ────────────────────────────────────────────────────────
 
 void c_state_features(
-    const int* hero_hand2, const int* hero_hand5,
+    const int* hero_hand2,
     const int* community, int n_comm,
     int my_bet, int opp_bet, int street, int is_bb,
     const int* my_disc, const int* opp_disc,
-    int use_hand5, float* features_out,
-    const int* street_bets_flat,
-    const float* street_last_ratios_flat,
-    const int*   street_bet_counts_flat,
-    const int*   history_players,
-    const int*   history_actions,
+    float* features_out,
+    const int* street_bet_counts_flat,
+    const int* history_players,
+    const int* history_actions,
     int history_len, int num_acts_this_street
 ) {
-    int sb[4][2] = {};
-    if (street_bets_flat) for(int s=0;s<4;s++){sb[s][0]=street_bets_flat[s*2];sb[s][1]=street_bets_flat[s*2+1];}
-    state_to_features(hero_hand2, hero_hand5, community, n_comm,
+    state_to_features(hero_hand2, community, n_comm,
                        my_bet, opp_bet, street, (bool)is_bb,
-                       my_disc, opp_disc, (bool)use_hand5, features_out,
-                       street_bets_flat ? sb : nullptr,
-                       street_last_ratios_flat, street_bet_counts_flat,
+                       my_disc, opp_disc, features_out,
+                       street_bet_counts_flat,
                        history_players, history_actions, history_len, num_acts_this_street);
 }
 

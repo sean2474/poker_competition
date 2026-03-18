@@ -13,4 +13,4 @@ A_RAISE_SMALL = 5  # postflop: 33% pot
 A_RAISE_LARGE = 6  # postflop: 75% pot
 
 NUM_ACTIONS     = 8
-FEATURE_DIM = 119  # C++ c_state_features outputs all 119 dims directly
+FEATURE_DIM = 77   # range-based: my_cat(17)+my_range(17)+opp_range(17)+board(8)+line(6)+pot(4)+blocker(4)+street(3)+pos(1)

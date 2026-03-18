@@ -22,13 +22,11 @@ assert _c_lib is not None, (
 
 # ── Function signatures ─────────────────────────────────────────────────────
 _c_lib.c_state_features.argtypes = [
-    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),  # hand2, hand5
+    ctypes.POINTER(ctypes.c_int),                                 # hand2
     ctypes.POINTER(ctypes.c_int), ctypes.c_int,                  # community, n_comm
     ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,      # my_bet,opp_bet,street,is_bb
     ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),  # my_disc, opp_disc
-    ctypes.c_int, ctypes.POINTER(ctypes.c_float),                 # use_hand5, features_out
-    ctypes.POINTER(ctypes.c_int),                                 # street_bets_flat
-    ctypes.POINTER(ctypes.c_float),                               # street_last_ratios_flat
+    ctypes.POINTER(ctypes.c_float),                               # features_out
     ctypes.POINTER(ctypes.c_int),                                 # street_bet_counts_flat
     ctypes.POINTER(ctypes.c_int),                                 # history_players
     ctypes.POINTER(ctypes.c_int),                                 # history_actions
@@ -99,6 +97,33 @@ _c_lib.c_postflop_collect_samples.argtypes = [
 _c_lib.c_postflop_get_evs.argtypes    = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
 _c_lib.c_postflop_n_pending.argtypes  = [ctypes.c_void_p, ctypes.c_int]
 _c_lib.c_postflop_n_pending.restype   = ctypes.c_int
+# Phase 3: raw game state alongside collect_pending
+_c_lib.c_postflop_get_pending_game_info.argtypes = [
+    ctypes.c_void_p, ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int),  # hero_hand_out  [cnt*2]
+    ctypes.POINTER(ctypes.c_int),  # community_out  [cnt*5]
+    ctypes.POINTER(ctypes.c_int),  # my_disc_out    [cnt*3]
+    ctypes.POINTER(ctypes.c_int),  # opp_disc_out   [cnt*3]
+    ctypes.POINTER(ctypes.c_int),  # cp_out         [cnt]
+    ctypes.POINTER(ctypes.c_int),  # bet_cp_out     [cnt]
+    ctypes.POINTER(ctypes.c_int),  # bet_opp_out    [cnt]
+    ctypes.POINTER(ctypes.c_int),  # game_idx_out   [cnt]
+]
+_c_lib.c_postflop_get_pending_game_info.restype = ctypes.c_int
+# Hand category classification
+_c_lib.c_classify_hand.argtypes = [
+    ctypes.c_int, ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.c_int,
+]
+_c_lib.c_classify_hand.restype = ctypes.c_int
+# Shared blocker flags (postflop + discard)
+_c_lib.c_blocker_flags.argtypes = [
+    ctypes.c_int, ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_float),   # out[4]
+]
 
 print(f"[game] C++ loaded: {_p}")
 
@@ -221,6 +246,15 @@ class PostflopBatch:
         self._n_valid   = np.zeros(n, dtype=np.int32)
         self._players   = np.zeros(n, dtype=np.int32)
         self._idx       = np.zeros(n, dtype=np.int32)
+        # Phase 3: raw game state buffers
+        self._hand2   = np.zeros((n, 2), dtype=np.int32)
+        self._comm    = np.full((n, 5), -1, dtype=np.int32)
+        self._my_disc = np.full((n, 3), -1, dtype=np.int32)
+        self._op_disc = np.full((n, 3), -1, dtype=np.int32)
+        self._cp      = np.zeros(n, dtype=np.int32)
+        self._bet_cp  = np.zeros(n, dtype=np.int32)
+        self._bet_op  = np.zeros(n, dtype=np.int32)
+        self._gidx    = np.zeros(n, dtype=np.int32)
 
     def init_one(self, i: int, state, p0_hand, p1_hand,
                  p0_hand5, p1_hand5, community, p0_disc, p1_disc,
@@ -238,6 +272,28 @@ class PostflopBatch:
             (ctypes.c_int*3)(*list(p1_disc)[:3]),
             ctypes.c_int(traversing_player),
         )
+
+    def get_pending_game_info(self, cnt: int):
+        """Call immediately after collect_pending(cnt, ...) for Phase 3 range tracking."""
+        _c_lib.c_postflop_get_pending_game_info(
+            self._ptr, self.n,
+            self._hand2.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._comm.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._my_disc.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._op_disc.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._cp.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._bet_cp.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._bet_op.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._gidx.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        )
+        return (self._hand2[:cnt],   # (cnt, 2)
+                self._comm[:cnt],    # (cnt, 5)
+                self._my_disc[:cnt], # (cnt, 3)
+                self._op_disc[:cnt], # (cnt, 3)
+                self._cp[:cnt],      # (cnt,)  current player
+                self._bet_cp[:cnt],  # (cnt,)  current player bet
+                self._bet_op[:cnt],  # (cnt,)  opponent bet
+                self._gidx[:cnt])   # (cnt,)  game index
 
     def collect_pending(self):
         cnt = _c_lib.c_postflop_collect_pending(

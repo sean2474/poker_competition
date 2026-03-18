@@ -22,9 +22,13 @@ cd cpp
 if [[ "$(uname)" == "Darwin" ]]; then
     g++ -O3 -shared -fPIC -std=c++17 -o libtraversal.dylib traversal.cpp -lpthread
     echo "Built libtraversal.dylib"
+    g++ -O3 -shared -fPIC -std=c++17 -o librangefinder.dylib rangefinder.cpp -lpthread
+    echo "Built librangefinder.dylib"
 else
     g++ -O3 -shared -fPIC -std=c++17 -o libtraversal.so traversal.cpp -lpthread -fopenmp
     echo "Built libtraversal.so"
+    g++ -O3 -shared -fPIC -std=c++17 -o librangefinder.so rangefinder.cpp -lpthread
+    echo "Built librangefinder.so"
 fi
 cd ..
 

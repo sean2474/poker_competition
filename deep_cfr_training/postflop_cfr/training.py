@@ -10,7 +10,7 @@ Weighting: 2t/T (linear CFR weighting — recent iterations trusted more).
 import torch
 import torch.optim as optim
 
-from models import (
+from .nets import (
     PostflopAdvantageNet,
     PostflopStrategyNet,
 )

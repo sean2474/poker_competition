@@ -16,17 +16,20 @@ import torch
 
 from game import (GameState, evaluate_showdown, batch_deal_discard,
                   batch_warmup_ev, PostflopBatch)
-from game.constants import NUM_ACTIONS, BIG_BLIND, FEATURE_DIM
+from game.constants import NUM_ACTIONS, BIG_BLIND
 from preflop_cfr.canonical import canonicalize
 
-WARMUP_ITERS       = 50    # hard fallback (if buffer never fills for some reason)
 MIN_WARMUP_SAMPLES = 2000  # per street per player before switching to neural net
 
 _rng = np.random.default_rng()
 
 
 def _postflop_ready(trainer) -> bool:
-    """Switch from warmup equity to neural net when buffer is sufficiently warm."""
+    """
+    Dynamically switch from C++ equity warmup to neural net.
+    Ends warmup when every (player, street) slot has MIN_WARMUP_SAMPLES.
+    No hard iteration cap — warmup length adapts to traversal speed.
+    """
     for p in range(2):
         for s in [1, 2, 3]:
             if len(trainer.adv_buffers[p].street_bufs[s]) < MIN_WARMUP_SAMPLES:
@@ -190,21 +193,121 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
     return float(postflop_ev)
 
 
-def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player: int):
+def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
+    """
+    Phase 2/3: replace fast_discard with DiscardCFR choices.
+
+    Vectorized: builds ALL (N×10) pair features at once and runs
+    TWO batched DiscardNet forwards (one for A, one for B) instead
+    of 2N separate calls.  ~10x faster than the per-game loop.
+    """
+    import ctypes
+    import torch
+    from discard_cfr.features import KEEP_PAIRS as DK_PAIRS, opp_cats_narrowed, \
+        PAIR_DIM, CTX_DIM
+    from game.features import _c_lib
+
+    N       = len(p0h5)
+    FDIM    = PAIR_DIM + CTX_DIM   # 44
+    p0h     = np.zeros((N, 2), dtype=np.int32)
+    p1h     = np.zeros((N, 2), dtype=np.int32)
+    p0d     = np.full((N, 3), -1, dtype=np.int32)
+    p1d     = np.full((N, 3), -1, dtype=np.int32)
+    feats_A = np.zeros((N * 10, FDIM), dtype=np.float32)
+    feats_B = np.zeros((N * 10, FDIM), dtype=np.float32)
+
+    # Pre-build pair features (categories + ranks + blockers) for each game
+    for i in range(N):
+        h5A = list(p0h5[i]); h5B = list(p1h5[i])
+        b3  = list(comms[i][:3])
+        n   = sum(1 for c in b3 if c >= 0)
+        brd = (ctypes.c_int * 5)(*[int(b3[j]) if j < n else -1 for j in range(5)])
+        tmp = (ctypes.c_float * 4)()
+        brs = np.array([(c % 9) / 8. if c >= 0 else 0. for c in b3], dtype=np.float32)
+
+        for k, (ai, aj) in enumerate(DK_PAIRS):
+            for h5, fs in [(h5A, feats_A), (h5B, feats_B)]:
+                c0, c1 = h5[ai], h5[aj]
+                cat = _c_lib.c_classify_hand(c0, c1, brd, n)
+                cat_oh = np.zeros(17, dtype=np.float32); cat_oh[cat] = 1.
+                hi = max(c0 % 9, c1 % 9) / 8.; lo = min(c0 % 9, c1 % 9) / 8.
+                _c_lib.c_blocker_flags(c0, c1, brd, n, tmp)
+                fs[i*10+k, :PAIR_DIM] = np.concatenate([cat_oh, [hi, lo], list(tmp)])
+
+        # Player A context: uniform opp range (is_bb=False)
+        oc_A = np.ones(17, dtype=np.float32) / 17
+        ctx_A = np.concatenate([brs, oc_A, [0.]])
+        feats_A[i*10:(i+1)*10, PAIR_DIM:] = ctx_A
+
+        # Player B context: uniform placeholder (updated after sampling A)
+        ctx_B = np.concatenate([brs, np.ones(17, dtype=np.float32)/17, [1.]])
+        feats_B[i*10:(i+1)*10, PAIR_DIM:] = ctx_B
+
+    # ── Batch forward: Player A ───────────────────────────────────────────────
+    net    = discard_trainer.net
+    device = next(net.parameters()).device
+    with torch.no_grad():
+        adv_A = net(torch.from_numpy(feats_A).to(device)).cpu().numpy()  # (N*10,)
+
+    for i in range(N):
+        h5A  = list(p0h5[i])
+        pos  = np.maximum(adv_A[i*10:(i+1)*10], 0.)
+        sA   = pos / pos.sum() if pos.sum() > 0 else np.ones(10)/10
+        sA   = sA.astype(np.float64); sA /= sA.sum()
+        ka   = int(_rng.choice(10, p=sA))
+        ai, aj = DK_PAIRS[ka]
+        p0h[i] = [h5A[ai], h5A[aj]]
+        p0d[i] = [h5A[k] for k in range(5) if k not in (ai, aj)]
+
+    # Update Player B ctx with actual opp_cats (now that p0d is known)
+    for i in range(N):
+        h5B = list(p1h5[i])
+        b3  = list(comms[i][:3])
+        brs = np.array([(c % 9) / 8. if c >= 0 else 0. for c in b3], dtype=np.float32)
+        oc_B = opp_cats_narrowed(h5B, b3, list(p0d[i]))
+        ctx_B = np.concatenate([brs, oc_B, [1.]])
+        feats_B[i*10:(i+1)*10, PAIR_DIM:] = ctx_B
+
+    # ── Batch forward: Player B ───────────────────────────────────────────────
+    with torch.no_grad():
+        adv_B = net(torch.from_numpy(feats_B).to(device)).cpu().numpy()
+
+    for i in range(N):
+        h5B  = list(p1h5[i])
+        pos  = np.maximum(adv_B[i*10:(i+1)*10], 0.)
+        sB   = pos / pos.sum() if pos.sum() > 0 else np.ones(10)/10
+        sB   = sB.astype(np.float64); sB /= sB.sum()
+        kb   = int(_rng.choice(10, p=sB))
+        bi, bj = DK_PAIRS[kb]
+        p1h[i] = [h5B[bi], h5B[bj]]
+        p1d[i] = [h5B[k] for k in range(5) if k not in (bi, bj)]
+
+    return p0h, p1h, p0d, p1d
+
+
+def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player: int,
+                           discard_trainer=None, discard_n_games: int = 50,
+                           phase: int = 1):
     """
     C++ traversal: preflop Python tabular CFR → postflop C++ state machine.
 
-    Each coroutine yields ('CPP_POSTFLOP', state, ...) once per postflop
-    entry (one per preflop branch). Sequential rounds process each batch.
+    Phase 1: fast_discard choices (heuristic) — range uses fast_discard distribution
+    Phase 2/3: DiscardCFR choices — range features match actual discard strategy
 
-    Warmup: c_batch_warmup_ev (C++ OpenMP, no GPU)
-    Neural: C++ PostflopBatch state machine + GPU batch inference
+    discard_trainer: optional DiscardCFR — if set, also accumulates discard samples.
+    discard_n_games: max games forwarded to discard_trainer per call.
     """
     r = batch_deal_discard(traversals_per_iter)
     p0h, p1h, p0d, p1d, comms, p0h5, p1h5 = r
 
-    is_warmup = (not _postflop_ready(trainer) and
-                 getattr(trainer, 'iteration', 1) <= getattr(trainer, 'warmup_iters', WARMUP_ITERS))
+    if discard_trainer is not None:
+        # Phase 2/3: recompute discards with DiscardCFR so range features match
+        p0h, p1h, p0d, p1d = _recompute_discards_with_cfr(
+            p0h5, p1h5, comms, discard_trainer)
+        n_d = min(discard_n_games, traversals_per_iter)
+        discard_trainer.run_iter(p0h5[:n_d], p1h5[:n_d], comms[:n_d])
+
+    is_warmup = not _postflop_ready(trainer)
 
     # Start N coroutines; they run preflop and yield CPP_POSTFLOP at first postflop state
     gens    = {}   # key → generator
@@ -232,8 +335,9 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
         while pending:
             _warmup_round(trainer, gens, pending, traversing_player)
     else:
+        game_states = {} if phase >= 3 else None   # Phase 3: per-game range tracker
         while pending:
-            _neural_round(trainer, gens, pending, traversing_player)
+            _neural_round(trainer, gens, pending, traversing_player, game_states)
 
 
 # ── Warmup round (C++ OpenMP equity) ─────────────────────────────────────────
@@ -272,7 +376,7 @@ def _warmup_round(trainer, gens, pending, tp):
 
 # ── Neural round (C++ PostflopBatch state machine + GPU) ─────────────────────
 
-def _neural_round(trainer, gens, pending, tp):
+def _neural_round(trainer, gens, pending, tp, game_states=None):
     """One round: C++ PostflopBatch + GPU inference for all pending requests."""
     keys = list(pending.keys())
     n    = len(keys)
@@ -289,6 +393,11 @@ def _neural_round(trainer, gens, pending, tp):
     while batch.n_pending() > 0:
         cnt, feats, valid, n_valid, players, game_idxs = batch.collect_pending()
         if cnt == 0: break
+        # Phase 3: update per-game ranges and override dims 17-50
+        if game_states is not None:
+            from postflop_cfr.range_tracker import apply_range_features
+            info = batch.get_pending_game_info(cnt)
+            feats = apply_range_features(feats[:cnt].copy(), info, game_states)
         strategies = np.zeros((cnt, NUM_ACTIONS), dtype=np.float32)
         f_t = torch.from_numpy(feats[:cnt]).to(device, non_blocking=True)
         for p in [0, 1]:
@@ -302,7 +411,7 @@ def _neural_round(trainer, gens, pending, tp):
 
     evs = batch.get_evs()
 
-    # Collect + bulk-add buffer samples
+    # Collect + bulk-add buffer samples (C++ outputs 75-dim directly)
     (adv_f, adv_v, adv_m, adv_s, adv_p, adv_i,
      str_f, str_v, str_m, str_s, str_i) = batch.collect_samples(
          float(trainer.iteration), tp)
