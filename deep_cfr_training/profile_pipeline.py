@@ -183,10 +183,13 @@ class PipelineProfiler:
             # ── Discard net training ─────────────────────────────────────────
             t_disc_tr = 0.
             if phase_idx >= 1:
-                t0 = time.time()
-                dloss = dc.train()
-                t_disc_tr = time.time() - t0
-                pf_history.append(float(dloss))
+                if len(dc.buf) >= dc.batch_size:
+                    t0 = time.time()
+                    dloss = dc.train()
+                    t_disc_tr = time.time() - t0
+                    pf_history.append(float(dloss))
+                else:
+                    dloss = 0.
             else:
                 dloss = 0.
 
