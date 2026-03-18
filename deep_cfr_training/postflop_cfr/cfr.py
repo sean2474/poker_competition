@@ -31,12 +31,14 @@ class PostflopCFR(IPostflopTrainer):
                        traversing_player: int,
                        discard_trainer=None,
                        discard_n_games: int = 50,
-                       phase: int = 1) -> None:
+                       phase: int = 1,
+                       adv_bufs=None, str_buf=None) -> None:
         """Run one round of game traversals (both warmup and neural modes)."""
         run_traversals_batched(self._state, traversals_per_iter, traversing_player,
                                discard_trainer=discard_trainer,
                                discard_n_games=discard_n_games,
-                               phase=phase)
+                               phase=phase,
+                               adv_bufs=adv_bufs, str_buf=str_buf)
 
     def train(self, trainer_state=None) -> list:
         """Retrain advantage nets. Returns [loss_p0, loss_p1]."""

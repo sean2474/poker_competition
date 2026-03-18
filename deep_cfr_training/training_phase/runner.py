@@ -167,17 +167,39 @@ class PhaseRunner:
             if in_phase2:
                 phase2_local += 1
 
-            # ── Traversal ──────────────────────────────────────────────────
-            for traversing in range(2):
-                inner.reset(total=self.traversals_per_iter)
-                inner.set_description(f'P{self._phase_idx+1} Trav{traversing}')
+            # ── Traversal (parallel: player 0 and 1 simultaneously) ────────
+            import threading
+            from postflop_cfr.buffers import ReservoirBuffer
+            buf_cap = self.state.adv_buffers[0].capacity
+
+            # Temp buffers per thread (avoids race conditions on shared buffers)
+            tmp_adv = [[ReservoirBuffer(buf_cap), ReservoirBuffer(buf_cap)]
+                       for _ in range(2)]   # tmp_adv[traversing][player]
+            tmp_str = [ReservoirBuffer(buf_cap) for _ in range(2)]
+
+            def _run_trav(traversing):
                 self.postflop_cfr.run_traversals(
                     self.traversals_per_iter, traversing,
                     discard_trainer  = dt_for_traversal,
                     discard_n_games  = self.discard_n_games,
                     phase            = self._phase_idx + 1,
+                    adv_bufs         = tmp_adv[traversing],
+                    str_buf          = tmp_str[traversing],
                 )
-                inner.refresh()
+
+            inner.reset(total=self.traversals_per_iter * 2)
+            inner.set_description(f'P{self._phase_idx+1} Trav 0+1 ‖')
+            threads = [threading.Thread(target=_run_trav, args=(tp,))
+                       for tp in range(2)]
+            for t in threads: t.start()
+            for t in threads: t.join()
+
+            # Merge temp buffers → real trainer buffers (sequential, safe)
+            for traversing in range(2):
+                for p in range(2):
+                    self.state.adv_buffers[p].merge_from(tmp_adv[traversing][p])
+                self.state.strategy_buffer.merge_from(tmp_str[traversing])
+            inner.refresh()
 
             # ── Training ───────────────────────────────────────────────────
             if (t + 1) % self.train_interval == 0:

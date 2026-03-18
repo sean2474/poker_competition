@@ -148,6 +148,19 @@ class ReservoirBuffer:
         """Read-only shim so old code `if buf.street_bufs[s]` still works."""
         return _StreetBufProxy(self._size)
 
+    def merge_from(self, other: 'ReservoirBuffer'):
+        """Drain all samples from `other` into this buffer (thread-safe merge)."""
+        for s in range(4):
+            if other._size[s] == 0: continue
+            n = other._size[s]
+            self.add_batch(
+                other._feats[s][:n],
+                other._values[s][:n],
+                other._iters[s][:n],
+                other._masks[s][:n],
+                np.full(n, s, dtype=np.int32),
+            )
+
     def __len__(self):
         return sum(self._size)
 

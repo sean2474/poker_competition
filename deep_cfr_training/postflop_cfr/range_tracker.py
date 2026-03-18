@@ -20,7 +20,7 @@ NOTE: Phase 3 will upgrade to net-based action probs once convergence is verifie
 import ctypes
 import numpy as np
 
-from range_finder import RangeFinder, N_CATS, N_HANDS
+from range_finder import N_CATS, N_HANDS
 
 # ── All 351 hand pairs (precomputed) ─────────────────────────────────────────
 
@@ -29,9 +29,51 @@ _ALL_PAIRS = np.array(
     dtype=np.int32,
 )  # shape (351, 2)
 
+# ── Per-card dead-mask: _CARD_MASK[c] = bool[351], True if pair contains c ───
+# Used for vectorized range initialization and discard update.
+_CARD_MASK = np.zeros((27, N_HANDS), dtype=bool)
+for _i, (_a, _b) in enumerate(_ALL_PAIRS.tolist()):
+    _CARD_MASK[_a, _i] = True
+    _CARD_MASK[_b, _i] = True
+
+
+def _dead_mask(cards) -> np.ndarray:
+    """Returns bool[351]: True for pairs containing any card in `cards`."""
+    m = np.zeros(N_HANDS, dtype=bool)
+    for c in cards:
+        if 0 <= int(c) < 27:
+            m |= _CARD_MASK[int(c)]
+    return m
+
+
+def _init_range(dead_cards) -> np.ndarray:
+    """float32[351]: uniform over non-dead pairs."""
+    r = np.where(_dead_mask(dead_cards), 0., 1.).astype(np.float32)
+    s = r.sum()
+    return r / s if s > 0 else r
+
+
+def _apply_discard(r: np.ndarray, disc3) -> np.ndarray:
+    """Remove impossible hands (discard-contained), renormalize."""
+    m = _dead_mask([c for c in disc3 if int(c) >= 0])
+    r[m] = 0.
+    s = r.sum()
+    if s > 0: r /= s
+    return r
+
+
+def _update_action(r: np.ndarray, probs: np.ndarray) -> np.ndarray:
+    """Bayesian multiply: r *= probs, renormalize."""
+    r *= probs
+    s = r.sum()
+    if s > 0: r /= s
+    return r
+
 # ── Board→category lookup cache ──────────────────────────────────────────────
 
-_board_cat_cache: dict = {}   # board_key → np.ndarray(351, int32)
+_board_cat_cache:   dict = {}   # board_key → int32[351]
+_board_onehot_cache: dict = {} # board_key → float32[351, 17]  (for matmul)
+_act_probs_cache:   dict = {}  # (board_key, is_aggressive) → float32[351]
 _c_classify_fn = None         # set lazily from game.features
 
 
@@ -41,6 +83,38 @@ def _get_c_classify():
         from game.features import _c_lib
         _c_classify_fn = _c_lib.c_classify_hand
     return _c_classify_fn
+
+
+def get_onehot_table(community: np.ndarray) -> np.ndarray:
+    """
+    Returns float32[351, 17] one-hot table for matmul-based category features.
+    Cached per board. Enables: range (k,351) @ onehot (351,17) = cats (k,17).
+    """
+    n_comm    = int(np.sum(community >= 0))
+    board_key = tuple(int(c) for c in community[:n_comm])
+    if board_key in _board_onehot_cache:
+        return _board_onehot_cache[board_key]
+    cats  = get_category_table(community)
+    oh    = np.zeros((N_HANDS, N_CATS), dtype=np.float32)
+    oh[np.arange(N_HANDS), cats] = 1.
+    _board_onehot_cache[board_key] = oh
+    return oh
+
+
+def get_action_probs(community: np.ndarray, is_aggressive: bool) -> np.ndarray:
+    """
+    Returns float32[351] action probs for (board, aggressive) — cached.
+    Avoids recomputing sigmoid for same board+action across all pending games.
+    """
+    n_comm    = int(np.sum(community >= 0))
+    board_key = tuple(int(c) for c in community[:n_comm])
+    key       = (board_key, bool(is_aggressive))
+    if key in _act_probs_cache:
+        return _act_probs_cache[key]
+    cats  = get_category_table(community)
+    probs = action_probs_heuristic(cats, is_aggressive)
+    _act_probs_cache[key] = probs
+    return probs
 
 
 def get_category_table(community: np.ndarray) -> np.ndarray:
@@ -80,141 +154,180 @@ def action_probs_heuristic(cats: np.ndarray, is_aggressive: bool) -> np.ndarray:
 
 class GameRangeState:
     """
-    Tracks my_rf and opp_rf for one game from street 1 onward.
+    Tracks opp_range and my_range for one game as plain numpy float32[351].
 
-    Initialized once (from discards) when first seen in collect_pending.
-    Updated at each subsequent collect_pending call (betting action inferred
-    from state transition: was there a bet to call at the NEW node?).
+    Pure numpy (no RangeFinder objects) — eliminates C++ ctypes overhead for
+    range maintenance.  Only get_category_table uses C++ (cached per board).
     """
 
-    __slots__ = ('opp_rf', 'my_rf',
-                 'prev_my_bet', 'prev_opp_bet', 'prev_cp',
-                 'prev_community', 'initialized')
+    __slots__ = ('opp_range', 'my_range', 'prev_cp', 'initialized')
 
     def __init__(self):
-        self.opp_rf        = None
-        self.my_rf         = None
-        self.prev_my_bet   = -1
-        self.prev_opp_bet  = -1
-        self.prev_cp       = -1
-        self.prev_community = None
-        self.initialized   = False
+        self.opp_range  = None
+        self.my_range   = None
+        self.prev_cp    = -1
+        self.initialized = False
 
     def init(self, hand2: np.ndarray,
              community: np.ndarray,
              my_disc:   np.ndarray,
              opp_disc:  np.ndarray):
-        """
-        Initialize from discards — same semantics as C++ _opp_range_features
-        and _my_range_features, but maintained in Python for incremental updates.
-
-        opp_rf: dead = my_hand + community, update = opp_disc
-        my_rf:  dead = community only,      update = my_disc
-        """
-        n_comm  = int(np.sum(community >= 0))
-        board   = [int(c) for c in community[:n_comm]]
-        board3  = (board + [-1, -1, -1])[:3]
-        board5  = (board + [-1]*5)[:5]
-
-        # opp_rf: opponent range from my perspective
-        dead_opp = [int(hand2[0]), int(hand2[1])]
-        self.opp_rf = RangeFinder()
-        self.opp_rf.init(dead_cards=dead_opp)
-        if n_comm > 0:
-            self.opp_rf.remove_cards(board)
+        """Initialize ranges from discards using vectorized numpy ops."""
+        # opp_range: dead = my_hand + community, update = opp_disc
+        dead_opp = list(hand2) + [int(c) for c in community if int(c) >= 0]
+        self.opp_range = _init_range(dead_opp)
         if any(int(c) >= 0 for c in opp_disc):
-            self.opp_rf.update_discard([int(c) for c in opp_disc], board3)
+            self.opp_range = _apply_discard(self.opp_range, opp_disc)
 
-        # my_rf: my range from opponent's perspective
-        self.my_rf = RangeFinder()
-        self.my_rf.init(dead_cards=board if n_comm > 0 else [])
+        # my_range: dead = community only, update = my_disc
+        dead_my = [int(c) for c in community if int(c) >= 0]
+        self.my_range = _init_range(dead_my)
         if any(int(c) >= 0 for c in my_disc):
-            self.my_rf.update_discard([int(c) for c in my_disc], board3)
+            self.my_range = _apply_discard(self.my_range, my_disc)
 
         self.initialized = True
 
     def update_from_betting(self, to_call: int, prev_cp: int,
                              community: np.ndarray):
-        """
-        Called when a new node arrives for this game.
-
-        to_call > 0 at the NEW node means the PREVIOUS player was aggressive
-        (bet/raise). to_call == 0 means they were passive (check/call).
-
-        prev_cp: which player (0 or 1) acted to reach the current node.
-        """
+        """Bayesian update using cached action_probs (board+aggressive memoized)."""
         if not self.initialized:
             return
-        is_aggressive = (to_call > 0)
-        cats          = get_category_table(community)
-        probs         = action_probs_heuristic(cats, is_aggressive)
-
+        probs = get_action_probs(community, to_call > 0)   # cached per board+agg
         if prev_cp == 1:
-            # Opponent (opp_rf, from MY perspective) acted
-            self.opp_rf.update_action(probs)
+            self.opp_range = _update_action(self.opp_range, probs)
         else:
-            # I acted (my_rf, from OPP perspective)
-            self.my_rf.update_action(probs)
+            self.my_range  = _update_action(self.my_range,  probs)
 
     def category_features(self, community: np.ndarray) -> tuple:
-        """
-        Returns (my_cats[17], opp_cats[17]) for feature override.
-        """
-        n_comm  = int(np.sum(community >= 0))
-        board5  = list(community[:n_comm]) + [-1] * (5 - n_comm)
-        uniform = np.ones(N_CATS, dtype=np.float32) / N_CATS
-        my_cats  = self.my_rf.category_probs(board5, 0.0)  if self.my_rf  else uniform
-        opp_cats = self.opp_rf.category_probs(board5, 0.0) if self.opp_rf else uniform
-        return my_cats, opp_cats
+        """Returns (my_cats[17], opp_cats[17]) via np.bincount (no C++ calls)."""
+        uniform    = np.ones(N_CATS, dtype=np.float32) / N_CATS
+        if not self.initialized:
+            return uniform, uniform
+        cats_table = get_category_table(community)   # cached int32[351]
+
+        def _cats(r):
+            out = np.bincount(cats_table,
+                              weights=r.astype(np.float64),
+                              minlength=N_CATS).astype(np.float32)
+            s = out.sum()
+            return out / s if s > 0 else uniform
+
+        return _cats(self.my_range), _cats(self.opp_range)
 
 
 # ── Batch update: override dims 17-50 in feature matrix ─────────────────────
+
+_UNIFORM17 = np.ones(N_CATS, dtype=np.float32) / N_CATS
+
 
 def apply_range_features(feats: np.ndarray,
                           game_infos: tuple,
                           game_states: dict):
     """
-    For each pending game, update GameRangeState and override dims [17-50].
+    Update GameRangeState per game and override dims [17-50] in feats.
 
-    game_infos: return value of batch.get_pending_game_info(cnt)
-    game_states: dict[game_idx → GameRangeState]
-
-    Returns feats (modified in-place).
+    Optimized:
+    1. action_probs cached by (board, aggressive) → no repeated sigmoid
+    2. category_features batched per board via matmul (range @ onehot)
+       eliminates per-game Python function call overhead
     """
     hand2_arr, comm_arr, my_disc_arr, opp_disc_arr, \
     cp_arr, bet_cp_arr, bet_op_arr, gidx_arr = game_infos
-
     cnt = len(gidx_arr)
+
+    # ── Phase 1: init / collect updates ──────────────────────────────────────
+    active  = []                             # (i, gs, comm) for initialized
+    pending = []                             # (gs, is_agg, prev_cp) to update
+
     for i in range(cnt):
-        gidx      = int(gidx_arr[i])
-        hand2     = hand2_arr[i]
-        community = comm_arr[i]
-        my_disc   = my_disc_arr[i]
-        opp_disc  = opp_disc_arr[i]
-        cp        = int(cp_arr[i])
-        bet_cp    = int(bet_cp_arr[i])
-        bet_op    = int(bet_op_arr[i])
-        to_call   = max(bet_op - bet_cp, 0)
+        gidx    = int(gidx_arr[i])
+        hand2   = hand2_arr[i]
+        comm    = comm_arr[i]
+        to_call = max(int(bet_op_arr[i]) - int(bet_cp_arr[i]), 0)
 
         if gidx not in game_states:
             gs = GameRangeState()
-            gs.init(hand2, community, my_disc, opp_disc)
+            gs.init(hand2, comm, my_disc_arr[i], opp_disc_arr[i])
             game_states[gidx] = gs
         else:
             gs = game_states[gidx]
-            # Update from previous action
             if gs.prev_cp >= 0:
-                gs.update_from_betting(to_call, gs.prev_cp, community)
+                pending.append((gs, to_call > 0, gs.prev_cp, comm))
 
-        # Record current state for next call
-        gs.prev_cp      = cp
-        gs.prev_my_bet  = bet_cp
-        gs.prev_opp_bet = bet_op
-
-        # Override dims 17-50 with Python-computed range categories
+        gs.prev_cp = int(cp_arr[i])
         if gs.initialized:
-            my_cats, opp_cats = gs.category_features(community)
-            feats[i, 17:34] = my_cats   # my_range_cats (opp's view of me)
-            feats[i, 34:51] = opp_cats  # opp_range_cats (my view of opp)
+            active.append((i, gs, comm))
+
+    # ── Batch apply pending range updates grouped by (board, is_agg) ────────
+    if pending:
+        from collections import defaultdict
+        upd_groups: dict = defaultdict(list)  # (board_key, is_agg, which) → [gs]
+        for gs, is_agg, prev_cp, comm in pending:
+            n_c = int(np.sum(comm >= 0))
+            bk  = tuple(int(c) for c in comm[:n_c])
+            which = 'opp' if prev_cp == 1 else 'my'
+            upd_groups[(bk, is_agg, which)].append((gs, comm))
+
+        for (bk, is_agg, which), group in upd_groups.items():
+            probs = get_action_probs(group[0][1], is_agg)  # cached
+            k = len(group)
+            if k == 1:
+                gs = group[0][0]
+                r = gs.opp_range if which == 'opp' else gs.my_range
+                r *= probs; s = r.sum()
+                if s > 0: r /= s
+            else:
+                # Batch multiply: (k, 351) *= probs[None, :]
+                ranges = np.stack(
+                    [gs.opp_range if which == 'opp' else gs.my_range
+                     for gs, _ in group])
+                ranges *= probs[np.newaxis, :]
+                norms = ranges.sum(axis=1, keepdims=True)
+                np.divide(ranges, np.maximum(norms, 1e-9), out=ranges)
+                for j, (gs, _) in enumerate(group):
+                    if which == 'opp':
+                        gs.opp_range = ranges[j]
+                    else:
+                        gs.my_range  = ranges[j]
+
+    if not active:
+        return feats
+
+    # ── Phase 2: batch category_features grouped by board ────────────────────
+    from collections import defaultdict
+    board_groups: dict = defaultdict(list)   # board_key → [(feat_idx, gs)]
+    board_comm:  dict = {}                   # board_key → community array
+
+    for i, gs, comm in active:
+        n_c = int(np.sum(comm >= 0))
+        key = tuple(int(c) for c in comm[:n_c])
+        board_groups[key].append((i, gs))
+        if key not in board_comm:
+            board_comm[key] = comm
+
+    for board_key, group in board_groups.items():
+        oh = get_onehot_table(board_comm[board_key])   # (351, 17) cached
+        k  = len(group)
+
+        # Stack all ranges: (k, 351)
+        my_stack  = np.empty((k, N_HANDS), dtype=np.float32)
+        opp_stack = np.empty((k, N_HANDS), dtype=np.float32)
+        for j, (_, gs) in enumerate(group):
+            my_stack[j]  = gs.my_range
+            opp_stack[j] = gs.opp_range
+
+        # Batch matmul: (k, 351) @ (351, 17) → (k, 17)
+        my_cats  = my_stack  @ oh
+        opp_cats = opp_stack @ oh
+
+        # Normalize row-wise
+        my_s  = my_cats.sum(axis=1,  keepdims=True)
+        opp_s = opp_cats.sum(axis=1, keepdims=True)
+        np.divide(my_cats,  np.maximum(my_s,  1e-9), out=my_cats)
+        np.divide(opp_cats, np.maximum(opp_s, 1e-9), out=opp_cats)
+
+        for j, (feat_idx, _) in enumerate(group):
+            feats[feat_idx, 17:34] = my_cats[j]
+            feats[feat_idx, 34:51] = opp_cats[j]
 
     return feats

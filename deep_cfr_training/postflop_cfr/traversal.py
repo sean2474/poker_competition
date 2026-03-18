@@ -287,7 +287,8 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
 
 def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player: int,
                            discard_trainer=None, discard_n_games: int = 50,
-                           phase: int = 1):
+                           phase: int = 1,
+                           adv_bufs=None, str_buf=None):
     """
     C++ traversal: preflop Python tabular CFR → postflop C++ state machine.
 
@@ -330,14 +331,14 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
             del gens[i]
 
     # Process rounds: each round sends EVs to all pending coroutines,
-    # which advance to the next preflop branch's postflop entry.
+    game_states = {} if phase >= 3 else None   # Phase 3: per-game range tracker
     if is_warmup:
         while pending:
             _warmup_round(trainer, gens, pending, traversing_player)
     else:
-        game_states = {} if phase >= 3 else None   # Phase 3: per-game range tracker
         while pending:
-            _neural_round(trainer, gens, pending, traversing_player, game_states)
+            _neural_round(trainer, gens, pending, traversing_player, game_states,
+                          adv_bufs=adv_bufs, str_buf=str_buf)
 
 
 # ── Warmup round (C++ OpenMP equity) ─────────────────────────────────────────
@@ -376,7 +377,8 @@ def _warmup_round(trainer, gens, pending, tp):
 
 # ── Neural round (C++ PostflopBatch state machine + GPU) ─────────────────────
 
-def _neural_round(trainer, gens, pending, tp, game_states=None):
+def _neural_round(trainer, gens, pending, tp, game_states=None,
+                   adv_bufs=None, str_buf=None):
     """One round: C++ PostflopBatch + GPU inference for all pending requests."""
     keys = list(pending.keys())
     n    = len(keys)
@@ -405,8 +407,7 @@ def _neural_round(trainer, gens, pending, tp, game_states=None):
             if len(pidx) == 0: continue
             with torch.no_grad():
                 adv = nets[p](f_t[pidx]).cpu().numpy()
-            for k2, gi in enumerate(pidx):
-                strategies[gi] = adv[k2]
+            strategies[pidx] = adv   # vectorized: no Python loop
         batch.resume(game_idxs[:cnt].copy(), strategies[:cnt])
 
     evs = batch.get_evs()
@@ -415,14 +416,16 @@ def _neural_round(trainer, gens, pending, tp, game_states=None):
     (adv_f, adv_v, adv_m, adv_s, adv_p, adv_i,
      str_f, str_v, str_m, str_s, str_i) = batch.collect_samples(
          float(trainer.iteration), tp)
+    _adv_bufs = adv_bufs if adv_bufs is not None else trainer.adv_buffers
+    _str_buf  = str_buf  if str_buf  is not None else trainer.strategy_buffer
     if len(adv_s) > 0:
         for p in [0, 1]:
             pm = adv_p == p
             if pm.any():
-                trainer.adv_buffers[p].add_batch(
+                _adv_bufs[p].add_batch(
                     adv_f[pm], adv_v[pm], adv_i[pm], adv_m[pm], adv_s[pm])
     if len(str_s) > 0:
-        trainer.strategy_buffer.add_batch(str_f, str_v, str_i, str_m, str_s)
+        _str_buf.add_batch(str_f, str_v, str_i, str_m, str_s)
 
     batch.free()
     pending.clear()
