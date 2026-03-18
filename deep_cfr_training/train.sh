@@ -1,21 +1,21 @@
 #!/bin/bash
 # Deep CFR Training Script
 #
-# RunPod H200 (139GB) + 192vCPU:
-#   bash train.sh 1500 20000 262144 200 100 1 5000000
+# RunPod H200 (139GB) + 192vCPU (8h target):
+#   bash train.sh 1200 5000 131072 50 50 1 2000000
 # RunPod H100 SXM5 (80GB) + 16+ vCPU:
-#   bash train.sh 1500 5000 131072 100 50 2 2000000
+#   bash train.sh 800 5000 65536 50 50 1 1000000
 # Local macOS (MPS):
 #   bash train.sh 50 200 4096 5 20 1 500000
 set -e
 
-ITERS=${1:-1500}
-TRAVERSALS=${2:-20000}
-BATCH_SIZE=${3:-262144}
-TRAIN_BATCHES=${4:-200}
-DISC_GAMES=${5:-100}
+ITERS=${1:-1200}
+TRAVERSALS=${2:-5000}
+BATCH_SIZE=${3:-131072}
+TRAIN_BATCHES=${4:-50}
+DISC_GAMES=${5:-50}
 N_TRAV_THREADS=${6:-1}
-BUFFER_SIZE=${7:-5000000}
+BUFFER_SIZE=${7:-2000000}
 
 
 cd "$(dirname "$0")"
@@ -57,7 +57,7 @@ python trainer.py \
     --discard-n-games "$DISC_GAMES"     \
     --n-trav-threads  "$N_TRAV_THREADS" \
     --buffer-size     "$BUFFER_SIZE"    \
-    --checkpoint-every 300              \
+    --checkpoint-every 100              \
     --output model/deep_cfr
 
 echo ""

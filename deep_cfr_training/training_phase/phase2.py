@@ -11,8 +11,8 @@ Training logic lives in discard_cfr/cfr.py::DiscardCFR.
 
 from .phase import Phase, PhaseStats
 
-MIN_ITERS = 30    # minimum iterations before checking convergence
-MAX_ITERS = 100   # force transition after this many iterations regardless
+MIN_ITERS = 15    # minimum iterations before checking convergence
+MAX_ITERS = 50    # force transition after this many iterations regardless
 PATIENCE  = 10    # rolling window for plateau detection
 DELTA     = 0.02  # 2% relative range = plateau
 
