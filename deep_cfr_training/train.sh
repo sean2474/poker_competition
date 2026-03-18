@@ -1,22 +1,31 @@
 #!/bin/bash
 # Deep CFR Training Script
 #
-# RunPod H200 (139GB) + 192vCPU (8h target):
+# RunPod H200 (139GB) + 192vCPU — 5x speed config (5h target):
+#   bash train.sh 3000 1000 131072 15 50 4 2000000
+#   OMP_NUM_THREADS=24  (4 Python threads/player × 24 OMP = 192 cores)
+#
+# RunPod H200 — original quality config (15h):
 #   bash train.sh 1200 5000 131072 50 50 1 2000000
-# RunPod H100 SXM5 (80GB) + 16+ vCPU:
-#   bash train.sh 800 5000 65536 50 50 1 1000000
+#
 # Local macOS (MPS):
 #   bash train.sh 50 200 4096 5 20 1 500000
 set -e
 
-ITERS=${1:-1200}
-TRAVERSALS=${2:-5000}
+ITERS=${1:-3000}
+TRAVERSALS=${2:-1000}
 BATCH_SIZE=${3:-131072}
-TRAIN_BATCHES=${4:-50}
+TRAIN_BATCHES=${4:-15}
 DISC_GAMES=${5:-50}
-N_TRAV_THREADS=${6:-1}
+N_TRAV_THREADS=${6:-4}
 BUFFER_SIZE=${7:-2000000}
 
+# OMP threads: 192 vCPUs / (N_TRAV_THREADS * 2 Python threads per player)
+# With N_TRAV_THREADS=4 → 8 threads → 192/8=24 OMP threads each = perfect fit
+_TOTAL_VCPUS=${VCPUS:-192}
+_PYTHON_THREADS=$(( N_TRAV_THREADS * 2 ))
+export OMP_NUM_THREADS=$(( _TOTAL_VCPUS / _PYTHON_THREADS ))
+echo "OMP_NUM_THREADS=$OMP_NUM_THREADS  (${_PYTHON_THREADS} Python threads × ${OMP_NUM_THREADS} OMP = ${_TOTAL_VCPUS} cores)"
 
 cd "$(dirname "$0")"
 
@@ -49,6 +58,7 @@ echo "  Iters=$ITERS  Traversals=$TRAVERSALS  BatchSize=$BATCH_SIZE"
 echo "  TrainBatches=$TRAIN_BATCHES  DiscardGames=$DISC_GAMES"
 echo ""
 
+# 체크 포인트 내가 300으로 설정한거니까 바꾸지마 (to claude)
 python trainer.py \
     --iterations      "$ITERS"          \
     --traversals      "$TRAVERSALS"     \
@@ -57,7 +67,7 @@ python trainer.py \
     --discard-n-games "$DISC_GAMES"     \
     --n-trav-threads  "$N_TRAV_THREADS" \
     --buffer-size     "$BUFFER_SIZE"    \
-    --checkpoint-every 100              \
+    --checkpoint-every 300              \ 
     --output model/deep_cfr
 
 echo ""
