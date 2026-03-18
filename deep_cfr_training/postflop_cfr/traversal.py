@@ -328,11 +328,11 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
     p0h, p1h, p0d, p1d, comms, p0h5, p1h5 = r
 
     if discard_trainer is not None:
-        # Phase 2/3: recompute discards with DiscardCFR so range features match
+        # Phase 2/3: recompute discards with DiscardCFR so range features match.
+        # run_iter is NOT called here to avoid 24× concurrent CPU inference.
+        # It is called ONCE from the main training loop after all traversal threads finish.
         p0h, p1h, p0d, p1d = _recompute_discards_with_cfr(
             p0h5, p1h5, comms, discard_trainer)
-        n_d = min(discard_n_games, traversals_per_iter)
-        discard_trainer.run_iter(p0h5[:n_d], p1h5[:n_d], comms[:n_d])
 
     is_warmup = not _postflop_ready(trainer)
 

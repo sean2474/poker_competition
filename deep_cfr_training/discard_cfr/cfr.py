@@ -79,17 +79,14 @@ class DiscardCFR(IDiscardTrainer):
     # ── IDiscardTrainer ───────────────────────────────────────────────────────
 
     def run_iter(self, hand5_As, hand5_Bs, boards5) -> None:
-        """Traverse a batch of games and add 20×N samples to buffer."""
-        import copy, threading
-        if not hasattr(self, '_lock'):
-            self._lock = threading.Lock()
-        with self._lock:
-            self.iteration += 1
-            iteration = float(self.iteration)
-            net_cpu = copy.deepcopy(self.net).cpu().eval()  # thread-safe: deepcopy, no in-place move
-        feats, advs = run_batch(hand5_As, hand5_Bs, boards5, net_cpu, iteration)
-        with self._lock:
-            self.buf.add_batch(feats, advs, iteration)
+        """Traverse a batch of games and add 20×N samples to buffer.
+        Called from a single thread (main training loop); no locking needed."""
+        self.iteration += 1
+        self.net.eval()
+        feats, advs = run_batch(hand5_As, hand5_Bs, boards5,
+                                self.net, float(self.iteration))
+        self.buf.add_batch(feats, advs, float(self.iteration))
+        self.net.train()  # restore train mode for subsequent training
 
     def train(self) -> float:
         """Retrain net from scratch on buffer. Returns mean loss."""

@@ -226,10 +226,13 @@ class PhaseRunner:
                 self.state.strategy_buffer.merge_from(tmp_str[idx])
             inner.refresh()
 
-            # ── Phase 2: collect discard samples BEFORE training ─────────────
-            if in_phase2:
-                _, _, _, _, comms, p0h5, p1h5 = batch_deal_discard(100)
-                self.state.discard_trainer.run_iter(p0h5, p1h5, comms)
+            # ── Discard sample collection (Phase 2 + Phase 3) ────────────────
+            # Single call after all traversal threads: avoids n_trav_threads×2 concurrent
+            # CPU run_iters. Uses a fresh batch for efficient GPU inference.
+            if in_phase2 or in_phase3:
+                n_disc = self.discard_n_games * max(1, self.n_trav_threads)
+                _, _, _, _, comms_d, p0h5_d, p1h5_d = batch_deal_discard(n_disc)
+                self.state.discard_trainer.run_iter(p0h5_d, p1h5_d, comms_d)
 
             # ── Training ────────────────────────────────────────────────
             if (t + 1) % self.train_interval == 0:

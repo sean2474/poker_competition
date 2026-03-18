@@ -194,9 +194,11 @@ def run_batch(hand5_As, hand5_Bs, boards5,
     feats_A[:, PDIM+3:PDIM+20] = 1./17
     feats_A[:, PDIM+20]        = 0.
 
-    net_cpu = copy.deepcopy(net).cpu().eval()
+    # Use net directly (caller ensures no concurrent access).
+    # Move inputs to net's device for fast GPU inference.
+    _device = next(net.parameters()).device
     with torch.no_grad():
-        adv_A_flat = net_cpu(torch.from_numpy(feats_A)).numpy()  # [N*10]
+        adv_A_flat = net(torch.from_numpy(feats_A).to(_device)).cpu().numpy()   # [N*10]
 
     pos_A = np.maximum(adv_A_flat.reshape(N, 10), 0.)
     s_A   = pos_A.sum(axis=1, keepdims=True)
@@ -230,7 +232,7 @@ def run_batch(hand5_As, hand5_Bs, boards5,
     feats_B_all[:, PDIM+20]        = 1.
 
     with torch.no_grad():
-        adv_B_flat = net_cpu(torch.from_numpy(feats_B_all)).numpy()  # [N*100]
+        adv_B_flat = net(torch.from_numpy(feats_B_all).to(_device)).cpu().numpy()  # [N*100]
 
     pos_B   = np.maximum(adv_B_flat.reshape(N * 10, 10), 0.)
     s_B     = pos_B.sum(axis=1, keepdims=True)
