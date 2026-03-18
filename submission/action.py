@@ -74,8 +74,11 @@ class DiscardNet(nn.Module):
 # ── Bet sizing helpers ────────────────────────────────────────────────────────
 
 def bet_frac(obs: dict, frac: float) -> tuple:
-    pot = obs['my_bet'] + obs['opp_bet']
-    amt = max(obs['min_raise'], min(obs['max_raise'], max(int(pot * frac), 1)))
+    pot   = obs['my_bet'] + obs['opp_bet']
+    max_r = obs['max_raise']
+    # big_pot: when max_raise < 75% of pot, sizes collapse → switch reference to max_raise
+    ref = max_r if (max_r * 4 < pot * 3) else pot
+    amt = max(obs['min_raise'], min(max_r, max(int(ref * frac), 1)))
     return (RAISE, amt, 0, 0)
 
 
@@ -88,7 +91,7 @@ def map_training_action(action_idx: int, obs: dict) -> tuple:
     elif action_idx in (3, 5): return bet_frac(obs, 0.33) if v[RAISE] else (CHECK, 0, 0, 0)
     elif action_idx in (4, 6): return bet_frac(obs, 0.75) if v[RAISE] else (CHECK, 0, 0, 0)
     elif action_idx == 7:
-        return (RAISE, obs['max_raise'], 0, 0) if v[RAISE] else (CALL, 0, 0, 0)
+        return bet_frac(obs, 1.0) if v[RAISE] else (CALL, 0, 0, 0)
     return (FOLD, 0, 0, 0)
 
 

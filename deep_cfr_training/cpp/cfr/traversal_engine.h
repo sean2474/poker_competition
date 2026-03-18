@@ -21,6 +21,7 @@ struct TraversalFrame {
     float strategy[MAX_VALID];
     float features[FEATURE_DIM];
     int   is_traversing;
+    float my_range_snap[351];   // saved g->my_range before this traversing frame's first action
 };
 
 // One game's full traversal state
@@ -31,6 +32,9 @@ struct PostflopGame {
     int p0_disc[3], p1_disc[3];
     int traversing_player;
     float iteration_weight;
+    // Persistent range state: updated at each action, used for features[17-50]
+    float opp_range[351];   // opponent range from traversing player's view
+    float my_range[351];    // our range from opponent's view
 
     TraversalFrame stack[MAX_STACK];
     int depth;
@@ -68,7 +72,9 @@ static inline float terminal_ev(const FullGameState& s, int tp,
 static inline void extract_features_full(const FullGameState& s, int cp,
                                            const int* p0h, const int* p1h,
                                            const int* p0d, const int* p1d,
-                                           const int* comm, float* out) {
+                                           const int* comm, float* out,
+                                           const float* opp_range = nullptr,
+                                           const float* my_range  = nullptr) {
     const int* my_hand  = (cp == 0) ? p0h : p1h;
     const int* my_disc  = (cp == 0) ? p0d : p1d;
     const int* opp_disc = (cp == 0) ? p1d : p0d;
@@ -79,7 +85,8 @@ static inline void extract_features_full(const FullGameState& s, int cp,
                        my_disc, opp_disc, out,
                        &s.street_bet_counts[0][0],
                        s.history_players, s.history_actions, s.history_len,
-                       s.num_actions_this_street);
+                       s.num_actions_this_street,
+                       opp_range, my_range);
 }
 
 static inline void regret_match(const float* adv, const int* valid, int n, float* strategy) {
@@ -125,6 +132,12 @@ static void advance_game(PostflopGame* g, const float* net_adv, std::mt19937* rn
             }
             for (int i = 0; i < f.n_valid; i++) if (f.valid[i] == chosen) { std::swap(f.valid[0], f.valid[i]); break; }
             f.n_valid = 1;
+            // Opponent acted: update opp_range from traversing player's perspective
+            if (chosen >= 0 && f.state.street > 0) {
+                int vis_n = std::min(f.state.street + 2, 5);
+                range_update_betting(g->opp_range, g->community, vis_n, chosen >= 3);
+                _validate_range(g->opp_range, "advance_game:opp_range_after_opp_act");
+            }
         }
     }
 
@@ -147,6 +160,9 @@ static void advance_game(PostflopGame* g, const float* net_adv, std::mt19937* rn
                     g->adv_street[g->n_adv] = f.state.street;
                     g->n_adv++;
                 }
+                // Restore my_range to pre-frame state after all traversing branches explored
+                if (f.state.street > 0)
+                    std::memcpy(g->my_range, f.my_range_snap, sizeof(float) * 351);
                 ev = node_ev;
             } else {
                 ev = f.action_evs[0];
@@ -156,6 +172,21 @@ static void advance_game(PostflopGame* g, const float* net_adv, std::mt19937* rn
             TraversalFrame& par = g->stack[g->depth - 1];
             par.action_evs[par.action_idx - 1] = ev;
             continue;
+        }
+
+        // For traversing nodes: maintain my_range per action branch
+        if (f.is_traversing && f.state.street > 0) {
+            if (f.action_idx == 0) {
+                // First action: snapshot my_range before any update
+                _validate_range(g->my_range, "advance_game:my_range_before_snap");
+                std::memcpy(f.my_range_snap, g->my_range, sizeof(float) * 351);
+            } else {
+                // Subsequent actions: restore from snapshot, then update for this action
+                std::memcpy(g->my_range, f.my_range_snap, sizeof(float) * 351);
+            }
+            int vis_n = std::min(f.state.street + 2, 5);
+            range_update_betting(g->my_range, g->community, vis_n, f.valid[f.action_idx] >= 3);
+            _validate_range(g->my_range, "advance_game:my_range_after_traversing_act");
         }
 
         int action = f.valid[f.action_idx++];
@@ -180,7 +211,8 @@ static void advance_game(PostflopGame* g, const float* net_adv, std::mt19937* rn
 
         extract_features_full(child, child.current_player,
                                g->p0_hand, g->p1_hand,
-                               g->p0_disc, g->p1_disc, g->community, nf.features);
+                               g->p0_disc, g->p1_disc, g->community, nf.features,
+                               g->opp_range, g->my_range);
         std::memcpy(g->pending_feats, nf.features, sizeof(float)*FEATURE_DIM);
         std::memcpy(g->pending_valid, nf.valid, sizeof(int)*nf.n_valid);
         g->pending_n_valid = nf.n_valid;

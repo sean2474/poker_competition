@@ -13,7 +13,7 @@ NUM_SUITS  = 3
 MAX_BET    = 100
 N_CATS     = 17
 N_HANDS    = 351   # C(27,2)
-FEATURE_DIM = 77
+FEATURE_DIM = 78
 
 def card_rank(c): return c % NUM_RANKS
 def card_suit(c): return c // NUM_RANKS
@@ -249,7 +249,7 @@ def board_texture(board: list, n_board: int) -> np.ndarray:
     f[2] = 1. if msc >= 2 else 0.                             # fd_present
     if nb >= 3: f[3] = 1. if (max_r - min_r) <= 4 else 0.    # connected
     f[4] = max_r / 8.                                          # high_rank
-    f[5] = 1. if (nb > 0 and msc == nb) else 0.              # monotone
+    f[5] = 1. if (nb > 0 and n_suits == 3) else 0.            # rainbow (3 different suits)
     f[6] = 1. if (nb > 0 and n_suits == 2) else 0.           # two_suited
     f[7] = 1. if (paired and (msc >= 2 or (nb >= 3 and (max_r-min_r) <= 4))) else 0.  # coord
     return f
@@ -314,5 +314,8 @@ def state_to_features(
 
     # [76] position
     f[76] = 1. if is_bb else 0.
+
+    # [77] pot / MAX_BET
+    f[77] = min(pot / float(MAX_BET), 1.0)
 
     return f

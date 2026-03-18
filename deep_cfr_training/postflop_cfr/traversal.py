@@ -335,16 +335,28 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
     # Phase 3 ALWAYS uses neural mode (bootstraps from empty buffers).
     # Phase 1/2 use warmup unless buffers are pre-filled.
     is_warmup = is_warmup and (phase < 3)
-    # Range tracker disabled: apply_range_features was 65-70% of H100 traversal time
-    # C++ already provides discard-based range in features[17-50]. Heuristic sigmoid
-    # betting updates added noise without sufficient benefit. Re-enable when optimized.
-    game_states = None
+
+    # Compute per-game ranges from the discard phase output.
+    # These carry over the discard-updated range to postflop (no re-init from scratch).
+    init_ranges = None
+    if not is_warmup:
+        opp_ranges, my_ranges = PostflopBatch.compute_ranges_batch(
+            traversals_per_iter, traversing_player,
+            np.ascontiguousarray(p0h, dtype=np.int32),
+            np.ascontiguousarray(p1h, dtype=np.int32),
+            np.ascontiguousarray(p0d, dtype=np.int32),
+            np.ascontiguousarray(p1d, dtype=np.int32),
+            np.ascontiguousarray(comms, dtype=np.int32),
+        )
+        init_ranges = (opp_ranges, my_ranges)  # indexed by original game key
+
     if is_warmup:
         while pending:
             _warmup_round(trainer, gens, pending, traversing_player)
     else:
         while pending:
-            _neural_round(trainer, gens, pending, traversing_player, game_states,
+            _neural_round(trainer, gens, pending, traversing_player,
+                          init_ranges=init_ranges,
                           adv_bufs=adv_bufs, str_buf=str_buf)
 
 
@@ -385,16 +397,25 @@ def _warmup_round(trainer, gens, pending, tp):
 # ── Neural round (C++ PostflopBatch state machine + GPU) ─────────────────────
 
 def _neural_round(trainer, gens, pending, tp, game_states=None,
-                   adv_bufs=None, str_buf=None):
+                   init_ranges=None, adv_bufs=None, str_buf=None):
     """One round: C++ PostflopBatch + GPU inference for all pending requests."""
     keys = list(pending.keys())
     n    = len(keys)
     if n == 0: return
 
+    assert init_ranges is not None, \
+        '_neural_round called without init_ranges — ranges must be passed from discard phase'
+    opp_ranges, my_ranges = init_ranges
+    assert opp_ranges.shape[1] == 351 and my_ranges.shape[1] == 351, \
+        f'init_ranges wrong shape: opp={opp_ranges.shape} my={my_ranges.shape}'
+
     batch = PostflopBatch(n)
     for j, k in enumerate(keys):
         g, (state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d) = pending[k]
-        batch.init_one(j, state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d, tp)
+        assert 0 <= k < opp_ranges.shape[0], \
+            f'game key {k} out of range for init_ranges (size={opp_ranges.shape[0]})'
+        batch.init_one(j, state, p0h, p1h, p0h5, p1h5, comm, p0d, p1d, tp,
+                       opp_range=opp_ranges[k], my_range=my_ranges[k])
 
     # GPU inference loop (all n games advance together)
     device = trainer.device
@@ -402,7 +423,7 @@ def _neural_round(trainer, gens, pending, tp, game_states=None,
     while batch.n_pending() > 0:
         cnt, feats, valid, n_valid, players, game_idxs = batch.collect_pending()
         if cnt == 0: break
-        # Phase 3: update per-game ranges and override dims 17-50
+        # Python range_tracker disabled (game_states=None); C++ handles range features.
         if game_states is not None:
             from postflop_cfr.range_tracker import apply_range_features
             info = batch.get_pending_game_info(cnt)

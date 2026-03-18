@@ -162,13 +162,63 @@ void c_batch_warmup_ev(int n,
 PostflopGame* c_postflop_alloc(int n) { return new PostflopGame[n](); }
 void          c_postflop_free(PostflopGame* g) { delete[] g; }
 
+// Batch-compute opp_range[351] and my_range[351] for N games from discard phase.
+// Call this AFTER discard decisions are finalized, then pass results to c_postflop_init_one.
+void c_compute_postflop_ranges_batch(
+    int n, int tp,
+    const int* p0_hands,    // [n*2]
+    const int* p1_hands,    // [n*2]
+    const int* p0_discs,    // [n*3]
+    const int* p1_discs,    // [n*3]
+    const int* communities, // [n*5]
+    float* opp_ranges_out,  // [n*351]
+    float* my_ranges_out    // [n*351]
+) {
+    #pragma omp parallel for schedule(static) if(n > 4)
+    for (int i = 0; i < n; i++) {
+        const int* tp_hand  = (tp == 0) ? (p0_hands + i*2) : (p1_hands + i*2);
+        const int* opp_disc = (tp == 0) ? (p1_discs + i*3) : (p0_discs + i*3);
+        const int* tp_disc  = (tp == 0) ? (p0_discs + i*3) : (p1_discs + i*3);
+        const int* comm     = communities + i*5;
+        float* opp_r = opp_ranges_out + (size_t)i * 351;
+        float* my_r  = my_ranges_out  + (size_t)i * 351;
+
+        int n_comm = 0, comm_cards[5];
+        for (int j = 0; j < 5; j++) if (comm[j] >= 0) comm_cards[n_comm++] = comm[j];
+
+        // opp_range: dead = tp_hand, remove community, update with opp's observed discards
+        int tp_dead[2] = {tp_hand[0], tp_hand[1]};
+        c_range_init(tp_dead, 2, opp_r);
+        if (n_comm > 0) c_range_remove_cards(opp_r, comm_cards, n_comm);
+        bool has_od = false;
+        for (int j = 0; j < 3; j++) if (opp_disc[j] >= 0) { has_od = true; break; }
+        if (has_od && n_comm >= 3) {
+            int b3[3] = {comm[0], comm[1], comm[2]};
+            c_range_update_discard(opp_r, opp_disc, b3);
+        }
+
+        // my_range: dead = community only, update with tp's observed discards
+        if (n_comm > 0) c_range_init(comm_cards, n_comm, my_r);
+        else { int nd[1] = {-1}; c_range_init(nd, 0, my_r); }
+        bool has_td = false;
+        for (int j = 0; j < 3; j++) if (tp_disc[j] >= 0) { has_td = true; break; }
+        if (has_td && n_comm >= 3) {
+            int b3[3] = {comm[0], comm[1], comm[2]};
+            c_range_update_discard(my_r, tp_disc, b3);
+        }
+    }
+}
+
 void c_postflop_init_one(PostflopGame* games, int idx,
     const int* state_flat,
     const int* p0h, const int* p1h,
     const int* p0h5, const int* p1h5,
     const int* community,
     const int* p0d, const int* p1d,
-    int tp)
+    int tp,
+    const float* init_opp_range,  // pre-computed from discard phase (or nullptr)
+    const float* init_my_range    // pre-computed from discard phase (or nullptr)
+)
 {
     PostflopGame& g = games[idx];
     std::memset(&g, 0, sizeof(PostflopGame));
@@ -194,7 +244,43 @@ void c_postflop_init_one(PostflopGame* games, int idx,
     std::copy(community,community+5,g.community);
     std::copy(p0d,p0d+3,g.p0_disc); std::copy(p1d,p1d+3,g.p1_disc);
     g.traversing_player=tp; g.ev=0.f; g.done=0; g.waiting=0; g.n_adv=0; g.n_str=0;
-    extract_features_full(s0,s0.current_player,g.p0_hand,g.p1_hand,g.p0_disc,g.p1_disc,g.community,g.stack[0].features);
+
+    // ── Initialize persistent ranges (from discard phase if provided) ──────────
+    if (init_opp_range != nullptr) {
+        std::memcpy(g.opp_range, init_opp_range, sizeof(float) * 351);
+    } else {
+        const int* tp_hand_p  = (tp == 0) ? p0h : p1h;
+        const int* opp_disc_p = (tp == 0) ? p1d : p0d;
+        int n_comm = 0, comm_cards[5];
+        for (int i = 0; i < 5; i++) if (community[i] >= 0) comm_cards[n_comm++] = community[i];
+        int tp_dead[2] = {tp_hand_p[0], tp_hand_p[1]};
+        c_range_init(tp_dead, 2, g.opp_range);
+        if (n_comm > 0) c_range_remove_cards(g.opp_range, comm_cards, n_comm);
+        bool has_od = false; for (int i=0;i<3;i++) if(opp_disc_p[i]>=0){has_od=true;break;}
+        if (has_od && n_comm >= 3) {
+            int b3[3]={community[0],community[1],community[2]};
+            c_range_update_discard(g.opp_range, opp_disc_p, b3);
+        }
+    }
+    _validate_range(g.opp_range, "c_postflop_init_one:opp_range");
+
+    if (init_my_range != nullptr) {
+        std::memcpy(g.my_range, init_my_range, sizeof(float) * 351);
+    } else {
+        const int* tp_disc_p = (tp == 0) ? p0d : p1d;
+        int n_comm = 0, comm_cards[5];
+        for (int i = 0; i < 5; i++) if (community[i] >= 0) comm_cards[n_comm++] = community[i];
+        if (n_comm > 0) c_range_init(comm_cards, n_comm, g.my_range);
+        else { int nd[1]={-1}; c_range_init(nd, 0, g.my_range); }
+        bool has_td = false; for (int i=0;i<3;i++) if(tp_disc_p[i]>=0){has_td=true;break;}
+        if (has_td && n_comm >= 3) {
+            int b3[3]={community[0],community[1],community[2]};
+            c_range_update_discard(g.my_range, tp_disc_p, b3);
+        }
+    }
+    _validate_range(g.my_range, "c_postflop_init_one:my_range");
+
+    extract_features_full(s0,s0.current_player,g.p0_hand,g.p1_hand,g.p0_disc,g.p1_disc,g.community,g.stack[0].features,g.opp_range,g.my_range);
     std::memcpy(g.pending_feats,g.stack[0].features,sizeof(float)*FEATURE_DIM);
     std::memcpy(g.pending_valid,g.stack[0].valid,sizeof(int)*g.stack[0].n_valid);
     g.pending_n_valid=g.stack[0].n_valid; g.pending_player=s0.current_player; g.waiting=1;

@@ -239,15 +239,12 @@ class PhaseRunner:
                                       f'checkpoint_{t+1:04d}.pt')
                 save_checkpoint(self.state, tagged, t + 1, save_buffers=False)
                 tqdm.write(f'  [ckpt] iter {t+1} → {tagged}')
-                try:
-                    from range_finder.eval import eval_rangefinder_mse
-                    rf = eval_rangefinder_mse(self.state, n_games=200)
-                    tqdm.write(
-                        f'  [rf]  p_true {rf["p_true_uniform"]:.4f}'
-                        f'→{rf["p_true_post_discard"]:.4f}'
-                    )
-                except Exception as _e:
-                    tqdm.write(f'  [rf]  skipped: {_e}')
+                from range_finder.eval import eval_rangefinder_mse
+                rf = eval_rangefinder_mse(self.state, n_games=200)
+                tqdm.write(
+                    f'  [rf]  p_true {rf["p_true_uniform"]:.4f}'
+                    f'→{rf["p_true_post_discard"]:.4f}'
+                )
 
             if _interrupted[0]:
                 save_checkpoint(self.state, ckpt_path, t + 1, save_buffers=True)

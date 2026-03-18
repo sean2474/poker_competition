@@ -48,35 +48,24 @@ def preflop_action(obs: dict, chart: dict, action_history: list) -> tuple:
     """
     v = obs['valid_actions']
     hand5 = [c for c in obs['my_cards'] if c >= 0]
-    if len(hand5) != 5:
-        return (CHECK, 0, 0, 0) if v[CHECK] else (CALL, 0, 0, 0)
+
+    assert chart, 'preflop chart must be loaded'
+    assert len(hand5) == 5, f'Expected 5-card hand at preflop, got {len(hand5)}: {hand5}'
 
     max_bet = max(obs['my_bet'], obs['opp_bet'])
 
-    # ── Chart lookup ──────────────────────────────────────────────────────────
-    if chart:
-        key  = preflop_key(hand5, max_bet, action_history)
-        strat = chart.get(key)
-        if strat is not None:
-            total = float(strat.sum())
-            if total > 0:
-                probs = strat / total   # 3-slot: [fold, call/check, raise]
-                slot = int(np.random.choice(3, p=probs.astype(np.float64)))
-                if slot == 0 and v[FOLD]:  return (FOLD, 0, 0, 0)
-                if slot == 2 and v[RAISE]:
-                    pot = obs['my_bet'] + obs['opp_bet']
-                    amt = min(obs['max_raise'], max(obs['min_raise'], pot // 2 + 1))
-                    return (RAISE, amt, 0, 0)
-                return (CALL, 0, 0, 0) if v[CALL] else (CHECK, 0, 0, 0)
+    key   = preflop_key(hand5, max_bet, action_history)
+    strat = chart.get(key)
+    assert strat is not None, f'preflop chart missing key: {key}'
 
-    # ── Fallback: hand-strength heuristic ─────────────────────────────────────
-    ranks = sorted([c % NUM_RANKS for c in hand5], reverse=True)
-    has_pair = any(ranks[i] == ranks[i+1] for i in range(4))
-    suited   = len(set(c // NUM_RANKS for c in hand5)) == 1
-    strength = (ranks[0] + ranks[1]) / 16. + (0.4 if has_pair else 0.) + (0.15 if suited else 0.)
+    total = float(strat.sum())
+    assert total > 0, f'preflop strategy sums to zero for key: {key}'
 
-    if strength > 0.95 and v[RAISE]:
-        return bet_frac(obs, 0.5)
-    if strength > 0.45:
-        return (CALL, 0, 0, 0) if v[CALL] else (CHECK, 0, 0, 0)
-    return (CHECK, 0, 0, 0) if v[CHECK] else (FOLD, 0, 0, 0)
+    probs = strat / total   # 3-slot: [fold, call/check, raise]
+    slot  = int(np.random.choice(3, p=probs.astype(np.float64)))
+    if slot == 0 and v[FOLD]:  return (FOLD, 0, 0, 0)
+    if slot == 2 and v[RAISE]:
+        pot = obs['my_bet'] + obs['opp_bet']
+        amt = min(obs['max_raise'], max(obs['min_raise'], pot // 2 + 1))
+        return (RAISE, amt, 0, 0)
+    return (CALL, 0, 0, 0) if v[CALL] else (CHECK, 0, 0, 0)

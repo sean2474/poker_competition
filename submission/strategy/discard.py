@@ -69,28 +69,13 @@ def decide_discard(obs: dict, discard_net=None) -> tuple:
     board3 = [c for c in comm if c >= 0][:3]
     is_bb  = obs.get('acting_agent', 0) == 1   # BB is player 1
 
-    if len(hand5) != 5:
-        return (DISCARD, 0, 0, 1)
+    assert len(hand5) == 5, f'Expected 5-card hand at discard, got {len(hand5)}: {hand5}'
+    assert discard_net is not None, 'discard_net must be loaded'
 
-    # ── DiscardNet inference ───────────────────────────────────────────────────
-    if discard_net is not None:
-        try:
-            opp_cats = _opp_cats_from_obs(hand5, board3, obs)
-            feats    = build_discard_feats(hand5, board3, opp_cats, is_bb)
-            strat    = discard_net.get_strategy(feats.astype(np.float32))
-            strat    = strat.astype(np.float64); strat /= strat.sum()
-            ka       = int(np.random.choice(10, p=strat))
-            ki, kj   = KEEP_PAIRS[ka]
-            return (DISCARD, 0, ki, kj)
-        except Exception:
-            pass   # fall through to heuristic
-
-    # ── fast_score heuristic fallback ─────────────────────────────────────────
-    from features import fast_score as _fs
-    b3 = (board3 + [-1]*3)[:3]
-    best_pair, best_s = (0, 1), -1e9
-    for ki, kj in KEEP_PAIRS:
-        s = _fs(hand5[ki], hand5[kj], b3)
-        if s > best_s:
-            best_s, best_pair = s, (ki, kj)
-    return (DISCARD, 0, best_pair[0], best_pair[1])
+    opp_cats = _opp_cats_from_obs(hand5, board3, obs)
+    feats    = build_discard_feats(hand5, board3, opp_cats, is_bb)
+    strat    = discard_net.get_strategy(feats.astype(np.float32))
+    strat    = strat.astype(np.float64); strat /= strat.sum()
+    ka       = int(np.random.choice(10, p=strat))
+    ki, kj   = KEEP_PAIRS[ka]
+    return (DISCARD, 0, ki, kj)

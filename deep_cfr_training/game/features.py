@@ -71,6 +71,20 @@ _c_lib.c_postflop_init_one.argtypes    = [
     ctypes.POINTER(ctypes.c_int),                          # community
     ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),  # p0/p1 disc
     ctypes.c_int,                                          # traversing_player
+    ctypes.POINTER(ctypes.c_float),                        # init_opp_range (or None)
+    ctypes.POINTER(ctypes.c_float),                        # init_my_range  (or None)
+]
+# Batch range computation from discard phase output
+_c_lib.c_compute_postflop_ranges_batch.argtypes = [
+    ctypes.c_int,                                          # n
+    ctypes.c_int,                                          # tp
+    ctypes.POINTER(ctypes.c_int),                          # p0_hands [n*2]
+    ctypes.POINTER(ctypes.c_int),                          # p1_hands [n*2]
+    ctypes.POINTER(ctypes.c_int),                          # p0_discs [n*3]
+    ctypes.POINTER(ctypes.c_int),                          # p1_discs [n*3]
+    ctypes.POINTER(ctypes.c_int),                          # communities [n*5]
+    ctypes.POINTER(ctypes.c_float),                        # opp_ranges_out [n*351]
+    ctypes.POINTER(ctypes.c_float),                        # my_ranges_out  [n*351]
 ]
 _c_lib.c_postflop_collect_pending.argtypes = [
     ctypes.c_void_p, ctypes.c_int,
@@ -258,9 +272,15 @@ class PostflopBatch:
 
     def init_one(self, i: int, state, p0_hand, p1_hand,
                  p0_hand5, p1_hand5, community, p0_disc, p1_disc,
-                 traversing_player: int):
+                 traversing_player: int,
+                 opp_range: np.ndarray = None,
+                 my_range:  np.ndarray = None):
         flat = serialize_gamestate(state)
         flat_c = flat.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+        opp_r_c = (opp_range.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                   if opp_range is not None else _NULL_FLOAT)
+        my_r_c  = (my_range.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                   if my_range  is not None else _NULL_FLOAT)
         _c_lib.c_postflop_init_one(
             self._ptr, i, flat_c,
             (ctypes.c_int*2)(*list(p0_hand)[:2]),
@@ -271,7 +291,55 @@ class PostflopBatch:
             (ctypes.c_int*3)(*list(p0_disc)[:3]),
             (ctypes.c_int*3)(*list(p1_disc)[:3]),
             ctypes.c_int(traversing_player),
+            opp_r_c, my_r_c,
         )
+
+    @staticmethod
+    def compute_ranges_batch(n: int, tp: int,
+                             p0h: np.ndarray, p1h: np.ndarray,
+                             p0d: np.ndarray, p1d: np.ndarray,
+                             comms: np.ndarray):
+        """Compute opp_range[n,351] and my_range[n,351] from discard-phase output.
+        Call AFTER discard decisions are finalized; pass results to init_one."""
+        opp_ranges = np.zeros((n, 351), dtype=np.float32)
+        my_ranges  = np.zeros((n, 351), dtype=np.float32)
+        _c_lib.c_compute_postflop_ranges_batch(
+            ctypes.c_int(n), ctypes.c_int(tp),
+            p0h.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            p1h.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            p0d.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            p1d.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            comms.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            opp_ranges.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            my_ranges.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+        # ── Range validity assertions ──────────────────────────────────────────
+        assert (opp_ranges >= 0).all(), \
+            f'compute_ranges_batch: opp_ranges has negative values (min={opp_ranges.min():.6f})'
+        assert (my_ranges >= 0).all(), \
+            f'compute_ranges_batch: my_ranges has negative values (min={my_ranges.min():.6f})'
+        opp_sums = opp_ranges.sum(axis=1)
+        my_sums  = my_ranges.sum(axis=1)
+        bad_opp = np.where((opp_sums < 0.98) | (opp_sums > 1.02))[0]
+        bad_my  = np.where((my_sums  < 0.98) | (my_sums  > 1.02))[0]
+        assert len(bad_opp) == 0, \
+            f'compute_ranges_batch: opp_ranges[{bad_opp}] sums={opp_sums[bad_opp]} not near 1.0'
+        assert len(bad_my) == 0, \
+            f'compute_ranges_batch: my_ranges[{bad_my}] sums={my_sums[bad_my]} not near 1.0'
+        # Verify discard filtering was applied: ranges must NOT be trivially uniform.
+        # After removing our hand (2 cards) + community (3+) + discard (3) cards, the
+        # uniform value over remaining ~260 pairs is < 1/260 ≈ 0.0038. If any range
+        # row is exactly uniform over all 351 (= 1/351 ≈ 0.00285), something went wrong.
+        uniform_351 = 1.0 / 351
+        for arr, name in [(opp_ranges, 'opp_ranges'), (my_ranges, 'my_ranges')]:
+            flat_uniform = np.abs(arr - uniform_351).max(axis=1) < 1e-5
+            if flat_uniform.any():
+                bad_idx = np.where(flat_uniform)[0]
+                raise AssertionError(
+                    f'compute_ranges_batch: {name}[{bad_idx}] is completely uniform '
+                    f'(1/351) — dead card filtering not applied'
+                )
+        return opp_ranges, my_ranges
 
     def get_pending_game_info(self, cnt: int):
         """Call immediately after collect_pending(cnt, ...) for Phase 3 range tracking."""

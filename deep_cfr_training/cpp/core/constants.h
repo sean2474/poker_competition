@@ -8,7 +8,7 @@ constexpr int NUM_RANKS        = 9;    // 2-9, A
 constexpr int NUM_SUITS        = 3;    // d, h, s
 constexpr int DECK_SIZE        = 27;
 constexpr int NUM_ACTIONS      = 8;
-constexpr int FEATURE_DIM      = 77;   // range-based: my_cat(17)+my_range(17)+opp_range(17)+board(8)+line(6)+pot(4)+blocker(4)+street(3)+pos(1)
+constexpr int FEATURE_DIM      = 78;   // range-based: my_cat(17)+my_range(17)+opp_range(17)+board(8)+line(6)+pot(4)+blocker(4)+street(3)+pos(1)+pot_ratio(1)
 constexpr int MAX_HISTORY      = 30;
 
 // Action IDs

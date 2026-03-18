@@ -89,12 +89,10 @@ class DiscardCFR(IDiscardTrainer):
 
     def train(self) -> float:
         """Retrain net from scratch on buffer. Returns mean loss."""
+        assert len(self.buf) >= self.batch_size, (
+            f'discard buffer too small to train: {len(self.buf)} < {self.batch_size}'
+        )
         net = DiscardNet(self.hidden_dim).to(self.device)
-        if len(self.buf) < self.batch_size:
-            net.eval()
-            self.net = net
-            return 0.0
-
         net.train()
         opt        = optim.Adam(net.parameters(), lr=self.lr)
         T          = float(self.iteration)
@@ -102,8 +100,7 @@ class DiscardCFR(IDiscardTrainer):
 
         for _ in range(self.num_batches):
             sample = self.buf.sample(self.batch_size)
-            if sample is None:
-                break
+            assert sample is not None, 'discard buffer returned None during training'
             feats, advs, iters = sample
             w   = torch.from_numpy(
                     (2.0 * iters / (T * (T + 1.0))).astype(np.float32)

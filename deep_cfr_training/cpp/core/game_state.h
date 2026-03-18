@@ -45,10 +45,12 @@ struct GameState {
                     actions[n++] = A_BET_SMALL;  // single preflop open size
                 } else {
                     int pot = bets[0] + bets[1];
-                    // Postflop: pot-relative sizing 33% / 75% / 100%
-                    int small_amt = std::max(min_raise, std::min(pot * 33 / 100, max_raise));
-                    int large_amt = std::max(min_raise, std::min(pot * 75 / 100, max_raise));
-                    int pot_amt   = std::max(min_raise, std::min(pot,             max_raise));
+                    // big_pot: switch reference to max_raise when max_raise < 75% of pot
+                    bool big_pot = (max_raise * 4 < pot * 3);
+                    int ref = big_pot ? max_raise : pot;
+                    int small_amt = std::max(min_raise, std::min(ref * 33 / 100, max_raise));
+                    int large_amt = std::max(min_raise, std::min(ref * 75 / 100, max_raise));
+                    int pot_amt   = std::max(min_raise, std::min(ref,             max_raise));
                     int thresh = std::max(2, pot / 20);
                     actions[n++] = A_BET_SMALL;
                     if (std::abs(pot_amt - large_amt) > thresh)
@@ -108,13 +110,15 @@ struct GameState {
             else                                        // 4-bet+: raise to MAX_BET (50BB per-hand cap)
                 raise_amt = max_raise;
         } else {
-            // Postflop: pot-relative sizing
+            // Postflop: pot-relative sizing; switch to max_raise-relative when big_pot
+            bool big_pot = (max_raise * 4 < pot * 3);
+            int ref = big_pot ? max_raise : pot;
             if (action == A_BET_SMALL || action == A_RAISE_SMALL)
-                raise_amt = std::max(mn, std::min(pot * 33 / 100, max_raise));
+                raise_amt = std::max(mn, std::min(ref * 33 / 100, max_raise));
             else if (action == A_BET_POT)
-                raise_amt = std::max(mn, std::min(pot, max_raise));
+                raise_amt = std::max(mn, std::min(ref, max_raise));
             else
-                raise_amt = std::max(mn, std::min(pot * 75 / 100, max_raise));
+                raise_amt = std::max(mn, std::min(ref * 75 / 100, max_raise));
         }
         // Preflop: allow all-in even if < standard size (incomplete raise)
         if (st == 0)
@@ -183,9 +187,11 @@ struct FullGameState {
                     actions[n++] = A_BET_SMALL;
                 } else {
                     int pot = bets[0]+bets[1], thresh = std::max(2, pot/20);
-                    int sa  = std::max(min_raise, std::min(pot*33/100, max_r));
-                    int la  = std::max(min_raise, std::min(pot*75/100, max_r));
-                    int pa  = std::max(min_raise, std::min(pot,        max_r));
+                    bool big_pot = (max_r * 4 < pot * 3);
+                    int ref = big_pot ? max_r : pot;
+                    int sa  = std::max(min_raise, std::min(ref*33/100, max_r));
+                    int la  = std::max(min_raise, std::min(ref*75/100, max_r));
+                    int pa  = std::max(min_raise, std::min(ref,        max_r));
                     actions[n++] = A_BET_SMALL;
                     if (std::abs(pa-la) > thresh) actions[n++] = A_BET_POT;
                     if (std::abs(la-sa) > thresh) actions[n++] = A_BET_LARGE;
@@ -228,9 +234,11 @@ struct FullGameState {
             else                       raise_amt = max_r;
             raise_amt = std::min(raise_amt, max_r);
         } else {
-            if (action==A_BET_SMALL||action==A_RAISE_SMALL) raise_amt=std::max(mn,std::min(pot*33/100,max_r));
-            else if (action==A_BET_POT)                      raise_amt=std::max(mn,std::min(pot,       max_r));
-            else                                             raise_amt=std::max(mn,std::min(pot*75/100,max_r));
+            bool big_pot = (max_r * 4 < pot * 3);
+            int ref = big_pot ? max_r : pot;
+            if (action==A_BET_SMALL||action==A_RAISE_SMALL) raise_amt=std::max(mn,std::min(ref*33/100,max_r));
+            else if (action==A_BET_POT)                      raise_amt=std::max(mn,std::min(ref,       max_r));
+            else                                             raise_amt=std::max(mn,std::min(ref*75/100,max_r));
             raise_amt = std::max(mn, std::min(raise_amt, max_r));
         }
         float pot_before = (float)(s.bets[0]+s.bets[1]);

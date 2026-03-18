@@ -54,9 +54,7 @@ class PlayerAgent(Agent):
 
     def _load_strategy_net(self):
         p = os.path.join(_MODEL_DIR, 'deep_cfr_strategy.pt')
-        if not os.path.exists(p):
-            self.logger.warning(f'strategy net not found: {p}')
-            return None
+        assert os.path.exists(p), f'strategy net not found: {p}'
         net = StrategyNet()
         net.load_state_dict(torch.load(p, map_location='cpu'))
         net.eval()
@@ -65,21 +63,18 @@ class PlayerAgent(Agent):
 
     def _load_preflop_chart(self):
         p = os.path.join(_MODEL_DIR, 'deep_cfr_preflop_chart.pkl')
-        if not os.path.exists(p):
-            self.logger.warning(f'preflop chart not found: {p}')
-            return {}
+        assert os.path.exists(p), f'preflop chart not found: {p}'
         with open(p, 'rb') as f:
             chart = pickle.load(f)
+        assert len(chart) > 0, 'preflop chart is empty'
         self.logger.info(f'preflop chart loaded: {len(chart)} infosets')
         return chart
 
     def _load_discard_net(self):
         p = os.path.join(_MODEL_DIR, 'deep_cfr_full.pt')
-        if not os.path.exists(p):
-            return None
+        assert os.path.exists(p), f'discard net checkpoint not found: {p}'
         ckpt = torch.load(p, map_location='cpu')
-        if 'discard_net' not in ckpt:
-            return None
+        assert 'discard_net' in ckpt, f"'discard_net' key missing from checkpoint: {p}"
         h = ckpt.get('discard_hidden', 128)
         net = DiscardNet(h)
         net.load_state_dict(ckpt['discard_net'])

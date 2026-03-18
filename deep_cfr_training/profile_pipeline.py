@@ -110,14 +110,12 @@ class PipelineProfiler:
                 from postflop_cfr import traversal as _t
                 _orig_recompute = _t._recompute_discards_with_cfr
                 _orig_apply     = None
-                try:
-                    import postflop_cfr.range_tracker as _rt
-                    _orig_apply = _rt.apply_range_features
-                    def _timed_apply(feats, infos, gstates):
-                        t = time.time(); r = _orig_apply(feats, infos, gstates)
-                        _p3_timers['range_feat'][0] += time.time()-t; return r
-                    _rt.apply_range_features = _timed_apply
-                except Exception: pass
+                import postflop_cfr.range_tracker as _rt
+                _orig_apply = _rt.apply_range_features
+                def _timed_apply(feats, infos, gstates):
+                    t = time.time(); r = _orig_apply(feats, infos, gstates)
+                    _p3_timers['range_feat'][0] += time.time()-t; return r
+                _rt.apply_range_features = _timed_apply
 
                 def _timed_recompute(p0h5, p1h5, comms, dt):
                     t = time.time(); r = _orig_recompute(p0h5, p1h5, comms, dt)

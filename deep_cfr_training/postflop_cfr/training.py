@@ -57,9 +57,7 @@ _PROFILE      = False      # flip True to print per-phase ms once for debugging
 
 def _sync(device):
     if device.type == 'cuda': torch.cuda.synchronize()
-    elif device.type == 'mps':
-        try: torch.mps.synchronize()
-        except Exception: pass
+    elif device.type == 'mps': torch.mps.synchronize()
 
 
 def _make_scaler(device):
@@ -75,8 +73,7 @@ def _train_adv_net(net, opt, buf, streets, batch_size, num_batches, total_iters,
     t0 = _t.perf_counter()
     n_load = min(max(batch_size, len(buf)), _GPU_LOAD_CAP)
     data = buf.sample_streets(streets, n_load)
-    if data is None:
-        return 0.0
+    assert data is not None, f'advantage buffer is empty for streets {streets} — cannot train'
     features, values, iterations, masks = data
     weights = (2.0 * iterations / max(total_iters, 1)).astype('float32')
     t1 = _t.perf_counter()
@@ -158,8 +155,7 @@ def _train_strategy_net(net, opt, buf, streets, batch_size, num_batches, total_i
     t0 = _t.perf_counter()
     n_load = min(max(batch_size, len(buf)), _GPU_LOAD_CAP)
     data = buf.sample_streets(streets, n_load)
-    if data is None:
-        return 0.0
+    assert data is not None, f'strategy buffer is empty for streets {streets} — cannot train'
     features, strategies, iterations, masks = data
     weights = (2.0 * iterations / max(total_iters, 1)).astype('float32')
     t1 = _t.perf_counter()

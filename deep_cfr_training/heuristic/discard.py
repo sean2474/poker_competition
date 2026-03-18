@@ -20,8 +20,8 @@ for _ext in ['libtraversal.so', 'libtraversal.dylib']:
         _trav_lib = ctypes.CDLL(_p)
         break
 
-if _trav_lib is not None:
-    _trav_lib.c_fast_discard.argtypes = [
+assert _trav_lib is not None, f'C++ traversal library not found in {_cpp_dir}'
+_trav_lib.c_fast_discard.argtypes = [
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
@@ -40,9 +40,6 @@ class DiscardHeuristic(IDiscardModel):
     def get_strategy(self, hand5, board3,
                      opp_cats: np.ndarray = None,
                      is_bb: bool = False) -> np.ndarray:
-        if _trav_lib is None:
-            return np.ones(N_KEEP_PAIRS, dtype=np.float32) / N_KEEP_PAIRS
-
         h5   = (ctypes.c_int * 5)(*[int(c) for c in hand5[:5]])
         b3   = (ctypes.c_int * 3)(*[int(c) for c in board3[:3]])
         ki   = ctypes.c_int()
@@ -57,4 +54,6 @@ class DiscardHeuristic(IDiscardModel):
                 strat = np.zeros(N_KEEP_PAIRS, dtype=np.float32)
                 strat[idx] = 1.0
                 return strat
-        return np.ones(N_KEEP_PAIRS, dtype=np.float32) / N_KEEP_PAIRS
+        raise RuntimeError(
+            f'c_fast_discard returned ({chosen_ki},{chosen_kj}) not found in hand5={list(hand5)}'
+        )
