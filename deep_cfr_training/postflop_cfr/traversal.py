@@ -331,6 +331,9 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
             del gens[i]
 
     # Process rounds: each round sends EVs to all pending coroutines,
+    # Phase 3 ALWAYS uses neural mode (bootstraps from empty buffers).
+    # Phase 1/2 use warmup unless buffers are pre-filled.
+    is_warmup = is_warmup and (phase < 3)
     game_states = {} if phase >= 3 else None   # Phase 3: per-game range tracker
     if is_warmup:
         while pending:
