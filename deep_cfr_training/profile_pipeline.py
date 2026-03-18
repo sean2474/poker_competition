@@ -12,7 +12,6 @@ Output: per-iteration CSV with all component timings + trend analysis.
 """
 
 import sys, os, time, csv, argparse, threading
-os.environ.setdefault('OMP_NUM_THREADS', '96')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch

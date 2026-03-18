@@ -9,7 +9,6 @@ import argparse
 import os
 import sys
 
-os.environ.setdefault('OMP_NUM_THREADS', '96')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from deep_cfr import DeepCFR

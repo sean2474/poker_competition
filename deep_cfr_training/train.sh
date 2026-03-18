@@ -17,9 +17,6 @@ DISC_GAMES=${5:-100}
 N_TRAV_THREADS=${6:-1}
 BUFFER_SIZE=${7:-5000000}
 
-# OMP: 2 Python threads (tp=0,tp=1) × 96 OMP threads = 192 CPUs
-# c_postflop_resume_batch threshold=200: OMP activates for n_pending≈200+ games
-export OMP_NUM_THREADS=96
 
 cd "$(dirname "$0")"
 
