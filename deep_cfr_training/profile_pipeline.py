@@ -30,7 +30,8 @@ class PipelineProfiler:
 
     def __init__(self, n_iter: int = 30, traversals: int = 1000,
                  discard_n_games: int = 50, batch_size: int = 65536,
-                 num_batches: int = 50, force_phase: int = 1):
+                 num_batches: int = 50, force_phase: int = 1,
+                 n_trav_threads: int = 1):
         self.trainer = DeepCFR()
         self.records = []        # list of dicts, one per iteration
         self.n_iter  = n_iter
@@ -39,6 +40,7 @@ class PipelineProfiler:
         self.batch_size  = batch_size
         self.num_batches = num_batches
         self.force_phase = force_phase
+        self.n_trav_threads = n_trav_threads
 
     def run(self):
         import threading
@@ -97,11 +99,14 @@ class PipelineProfiler:
 
             dt = discard_model if phase_idx == 2 else None
 
-            # ── Traversal (parallel: player 0 + 1) ──────────────────────────
-            buf_cap = trainer.adv_buffers[0].capacity
-            tmp_adv = [[ReservoirBuffer(buf_cap), ReservoirBuffer(buf_cap)]
-                       for _ in range(2)]
-            tmp_str = [ReservoirBuffer(buf_cap) for _ in range(2)]
+            # ── Traversal (n_trav_threads per player) ─────────────────────
+            n_t      = self.n_trav_threads
+            per_th   = max(1, self.traversals // n_t)
+            tot_th   = n_t * 2
+            buf_cap  = trainer.adv_buffers[0].capacity
+            tmp_adv  = [[ReservoirBuffer(buf_cap), ReservoirBuffer(buf_cap)]
+                        for _ in range(tot_th)]
+            tmp_str  = [ReservoirBuffer(buf_cap) for _ in range(tot_th)]
 
             # ── Phase 3: monkey-patch sub-component timers ────────────────
             _p3_timers = {'recompute': [0.], 'run_iter': [0.],
@@ -128,24 +133,27 @@ class PipelineProfiler:
                     _p3_timers['run_iter'][0] += time.time()-t
                 dc.run_iter = _timed_ri
 
-            def _run_tp(tp):
+            def _run_tp(thread_idx, tp):
                 run_traversals_batched(
-                    trainer, self.traversals, tp,
+                    trainer, per_th, tp,
                     discard_trainer=dt, discard_n_games=self.discard_n_games,
                     phase=phase_idx + 1,
-                    adv_bufs=tmp_adv[tp], str_buf=tmp_str[tp],
+                    adv_bufs=tmp_adv[thread_idx], str_buf=tmp_str[thread_idx],
                 )
 
             t0 = time.time()
-            threads = [threading.Thread(target=_run_tp, args=(tp,)) for tp in range(2)]
+            threads = []
+            for tp in range(2):
+                for j in range(n_t):
+                    threads.append(threading.Thread(target=_run_tp, args=(tp*n_t+j, tp)))
             for th in threads: th.start()
             for th in threads: th.join()
             t_trav = time.time() - t0
 
             t0 = time.time()
-            for tp in range(2):
-                for p in range(2): trainer.adv_buffers[p].merge_from(tmp_adv[tp][p])
-                trainer.strategy_buffer.merge_from(tmp_str[tp])
+            for idx in range(tot_th):
+                for p in range(2): trainer.adv_buffers[p].merge_from(tmp_adv[idx][p])
+                trainer.strategy_buffer.merge_from(tmp_str[idx])
             t_merge = time.time() - t0
 
             # ── Restore Phase 3 monkey-patches ────────────────────────────────
@@ -299,12 +307,17 @@ if __name__ == '__main__':
     parser.add_argument('--disc-games',  type=int, default=50)
     parser.add_argument('--batch-size',  type=int, default=65536)
     parser.add_argument('--num-batches', type=int, default=50)
-    parser.add_argument('--force-phase', type=int, default=1,
+    parser.add_argument('--force-phase',    type=int, default=1,
                         help='Start at Phase N directly (skip earlier phases)')
+    parser.add_argument('--n-trav-threads', type=int, default=1,
+                        help='parallel traversal threads per player (matches runner.py n_trav_threads)')
     args = parser.parse_args()
 
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    total_threads = args.n_trav_threads * 2
+    per_thread    = max(1, args.traversals // args.n_trav_threads)
     print(f"\nReal-pipeline profiler: {args.iterations} iters × {args.traversals} traversals")
-    print(f"Device: {'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'}\n")
+    print(f"Device: {device}  |  threads: {total_threads} ({args.n_trav_threads}/player)  |  {per_thread} games/thread\n")
 
     prof = PipelineProfiler(
         n_iter=args.iterations,
@@ -313,5 +326,6 @@ if __name__ == '__main__':
         batch_size=args.batch_size,
         num_batches=args.num_batches,
         force_phase=args.force_phase,
+        n_trav_threads=args.n_trav_threads,
     )
     prof.run()
