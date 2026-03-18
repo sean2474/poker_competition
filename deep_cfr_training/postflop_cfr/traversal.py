@@ -243,11 +243,12 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
     feats_A[:, PDIM+3:PDIM+20] = 1.0 / 17  # uniform opp cats
     feats_A[:, PDIM+20] = 0.              # is_bb=False for player A
 
-    # ── Step 4: DiscardNet forward for Player A (CPU, thread-safe copy) ───────
-    import copy
-    net = copy.deepcopy(discard_trainer.net).cpu().eval()
+    # ── Step 4: DiscardNet forward for Player A (GPU direct) ───────────────
+    _dnet = discard_trainer.net
+    _ddev = next(_dnet.parameters()).device
+    _dnet.eval()
     with torch.no_grad():
-        adv_A = net(torch.from_numpy(feats_A)).numpy()   # (N*10,)
+        adv_A = _dnet(torch.from_numpy(feats_A).to(_ddev)).cpu().numpy()   # (N*10,)
 
     # ── Step 5: sample Player A discards (vectorized) ─────────────────────────
     adv_A_reshaped = adv_A.reshape(N, 10)
@@ -288,7 +289,7 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
 
     # ── Step 8: DiscardNet forward for Player B ────────────────────────────────
     with torch.no_grad():
-        adv_B = net(torch.from_numpy(feats_B)).numpy()   # (N*10,)
+        adv_B = _dnet(torch.from_numpy(feats_B).to(_ddev)).cpu().numpy()   # (N*10,)
 
     # ── Step 9: sample Player B discards (vectorized) ─────────────────────────
     adv_B_reshaped = adv_B.reshape(N, 10)
