@@ -376,6 +376,11 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
         )
         init_ranges = (opp_ranges, my_ranges)  # indexed by original game key
 
+    # Per-thread CUDA stream: allows GPU to overlap inference across threads
+    _cuda_stream = (torch.cuda.Stream()
+                    if trainer.device.type == 'cuda' and not is_warmup
+                    else None)
+
     if is_warmup:
         while pending:
             _warmup_round(trainer, gens, pending, traversing_player)
@@ -383,7 +388,8 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
         while pending:
             _neural_round(trainer, gens, pending, traversing_player,
                           init_ranges=init_ranges,
-                          adv_bufs=adv_bufs, str_buf=str_buf)
+                          adv_bufs=adv_bufs, str_buf=str_buf,
+                          cuda_stream=_cuda_stream)
 
 
 # ── Warmup round (C++ OpenMP equity) ─────────────────────────────────────────
@@ -423,7 +429,8 @@ def _warmup_round(trainer, gens, pending, tp):
 # ── Neural round (C++ PostflopBatch state machine + GPU) ─────────────────────
 
 def _neural_round(trainer, gens, pending, tp, game_states=None,
-                   init_ranges=None, adv_bufs=None, str_buf=None):
+                   init_ranges=None, adv_bufs=None, str_buf=None,
+                   cuda_stream=None):
     """One round: C++ PostflopBatch + GPU inference for all pending requests."""
     keys = list(pending.keys())
     n    = len(keys)
@@ -446,6 +453,11 @@ def _neural_round(trainer, gens, pending, tp, game_states=None,
     # GPU inference loop (all n games advance together)
     device = trainer.device
     nets   = trainer.adv_nets
+    # Use per-thread CUDA stream so multiple threads can overlap GPU work.
+    import contextlib
+    stream_ctx = (torch.cuda.stream(cuda_stream)
+                  if cuda_stream is not None and device.type == 'cuda'
+                  else contextlib.nullcontext())
     while batch.n_pending() > 0:
         cnt, feats, valid, n_valid, players, game_idxs = batch.collect_pending()
         if cnt == 0: break
@@ -455,13 +467,14 @@ def _neural_round(trainer, gens, pending, tp, game_states=None,
             info = batch.get_pending_game_info(cnt)
             feats = apply_range_features(feats[:cnt].copy(), info, game_states)
         strategies = np.zeros((cnt, NUM_ACTIONS), dtype=np.float32)
-        f_t = torch.from_numpy(feats[:cnt]).to(device, non_blocking=True)
-        for p in [0, 1]:
-            pidx = np.where(players[:cnt] == p)[0]
-            if len(pidx) == 0: continue
-            with torch.no_grad():
-                adv = nets[p](f_t[pidx]).cpu().numpy()
-            strategies[pidx] = adv   # vectorized: no Python loop
+        with stream_ctx:
+            f_t = torch.from_numpy(feats[:cnt]).to(device, non_blocking=True)
+            for p in [0, 1]:
+                pidx = np.where(players[:cnt] == p)[0]
+                if len(pidx) == 0: continue
+                with torch.no_grad():
+                    adv = nets[p](f_t[pidx]).cpu().numpy()
+                strategies[pidx] = adv
         batch.resume(game_idxs[:cnt].copy(), strategies[:cnt])
 
     evs = batch.get_evs()
