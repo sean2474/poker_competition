@@ -11,7 +11,8 @@ Training logic lives in discard_cfr/cfr.py::DiscardCFR.
 
 from .phase import Phase, PhaseStats
 
-MIN_ITERS = 20    # minimum iterations before checking convergence
+MIN_ITERS = 30    # minimum iterations before checking convergence
+MAX_ITERS = 100   # force transition after this many iterations regardless
 PATIENCE  = 10    # rolling window for plateau detection
 DELTA     = 0.02  # 2% relative range = plateau
 
@@ -22,6 +23,8 @@ class Phase2(Phase):
     def is_complete(self, stats: PhaseStats) -> bool:
         if stats.iteration < MIN_ITERS:
             return False
+        if stats.iteration >= MAX_ITERS:
+            return True   # force exit even without plateau
         hist = stats.discard_loss_history
         if len(hist) < PATIENCE:
             return False

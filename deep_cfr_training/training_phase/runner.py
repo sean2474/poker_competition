@@ -143,6 +143,10 @@ class PhaseRunner:
                      position=0, leave=True)
         inner = tqdm(total=1, position=1, leave=False, bar_format=_bar)
 
+        import threading
+        from postflop_cfr.buffers import ReservoirBuffer
+        from game.features import batch_deal_discard
+
         for t in pbar:
             self.state.iteration = t + 1
 
@@ -168,8 +172,6 @@ class PhaseRunner:
                 phase2_local += 1
 
             # ── Traversal (parallel: player 0 and 1 simultaneously) ────────
-            import threading
-            from postflop_cfr.buffers import ReservoirBuffer
             buf_cap = self.state.adv_buffers[0].capacity
 
             # Temp buffers per thread (avoids race conditions on shared buffers)
@@ -201,22 +203,23 @@ class PhaseRunner:
                 self.state.strategy_buffer.merge_from(tmp_str[traversing])
             inner.refresh()
 
-            # ── Training ───────────────────────────────────────────────────
+            # ── Phase 2: collect discard samples BEFORE training ─────────────
+            if in_phase2:
+                _, _, _, _, comms, p0h5, p1h5 = batch_deal_discard(100)
+                self.state.discard_trainer.run_iter(p0h5, p1h5, comms)
+
+            # ── Training ────────────────────────────────────────────────
             if (t + 1) % self.train_interval == 0:
                 inner.set_description('Train')
                 losses = self.postflop_cfr.train()
 
                 if in_phase2 or in_phase3:
-                    discard_loss = self.state.discard_trainer.train()
-                    losses.append(discard_loss)
+                    dt = self.state.discard_trainer
+                    if len(dt.buf) >= dt.batch_size:
+                        discard_loss = dt.train()
+                        losses.append(discard_loss)
 
                 inner.refresh()
-
-            # ── Phase 2: also run discard traversal (standalone) ───────────
-            if in_phase2:
-                from game.features import batch_deal_discard
-                _, _, _, _, comms, p0h5, p1h5 = batch_deal_discard(100)
-                self.state.discard_trainer.run_iter(p0h5, p1h5, comms)
 
             # ── Progress bar ───────────────────────────────────────────────
             elapsed = time.time() - t0

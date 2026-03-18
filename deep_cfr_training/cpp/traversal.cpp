@@ -157,6 +157,86 @@ void c_batch_warmup_ev(int n,
     }
 }
 
+// ── Discard feature batch builders ───────────────────────────────────────────
+// Replace N×10×2 individual c_classify_hand / c_blocker_flags ctypes calls with
+// a single C++ call (200K ctypes calls/iter → 1 call).
+
+static constexpr int _KEEP_PAIRS[10][2] = {
+    {0,1},{0,2},{0,3},{0,4},{1,2},{1,3},{1,4},{2,3},{2,4},{3,4}
+};
+static constexpr int _DISCARD_PAIR_DIM = 23;  // cat_oh(17)+hi(1)+lo(1)+blocker(4)
+
+// Compute pair features (23-dim) for all 10 keep-pairs of all N 5-card hands.
+// feats_out: [n * 10 * 23] row-major (game-major, then pair-major).
+static void _build_pair_feats_for_hand(
+    const int* h5, const int* board5, int n_board, float* out)
+{
+    float bl[4];
+    for (int k = 0; k < 10; k++) {
+        int c0 = h5[_KEEP_PAIRS[k][0]], c1 = h5[_KEEP_PAIRS[k][1]];
+        float* f = out + k * _DISCARD_PAIR_DIM;
+        int cat = classify_hand(c0, c1, board5, n_board);
+        for (int j = 0; j < 17; j++) f[j] = 0.f; f[cat] = 1.f;
+        f[17] = (float)std::max(c0 % NUM_RANKS, c1 % NUM_RANKS) / (NUM_RANKS - 1.f);
+        f[18] = (float)std::min(c0 % NUM_RANKS, c1 % NUM_RANKS) / (NUM_RANKS - 1.f);
+        compute_blocker_flags(c0, c1, board5, n_board, bl);
+        f[19] = bl[0]; f[20] = bl[1]; f[21] = bl[2]; f[22] = bl[3];
+    }
+}
+
+void c_build_discard_pair_features_batch(
+    int n,
+    const int* hand5s_A, const int* hand5s_B,  // [n*5] each
+    const int* boards3,                          // [n*3] first 3 board cards
+    float* feats_A_pair_out,                     // [n*10*23]
+    float* feats_B_pair_out                      // [n*10*23]
+) {
+    #pragma omp parallel for schedule(static) if(n > 4)
+    for (int i = 0; i < n; i++) {
+        const int* b3 = boards3 + i * 3;
+        int board5[5] = {-1,-1,-1,-1,-1}, nb = 0;
+        for (int j = 0; j < 3; j++) if (b3[j] >= 0) board5[nb++] = b3[j];
+        _build_pair_feats_for_hand(hand5s_A + i*5, board5, nb, feats_A_pair_out + i*10*_DISCARD_PAIR_DIM);
+        _build_pair_feats_for_hand(hand5s_B + i*5, board5, nb, feats_B_pair_out + i*10*_DISCARD_PAIR_DIM);
+    }
+}
+
+// Compute 17-dim opp range category probs for N Player-B states.
+// Used to build Player B's context after Player A's discard is known.
+void c_opp_cats_narrowed_batch(
+    int n,
+    const int* hand5s_B,   // [n*5] Player B's 5-card hands (dead cards)
+    const int* boards3,    // [n*3] first 3 board cards
+    const int* opp_disc3s, // [n*3] Player A's discards (opp from B's view)
+    float* cats_out        // [n*17] output
+) {
+    #pragma omp parallel for schedule(static) if(n > 4)
+    for (int i = 0; i < n; i++) {
+        const int* h5  = hand5s_B   + i * 5;
+        const int* b3  = boards3    + i * 3;
+        const int* d3  = opp_disc3s + i * 3;
+        float* cats    = cats_out   + i * 17;
+
+        float range[351];
+        c_range_init(h5, 5, range);
+
+        int board_cards[3]; int nb = 0;
+        for (int j = 0; j < 3; j++) if (b3[j] >= 0) board_cards[nb++] = b3[j];
+        if (nb > 0) c_range_remove_cards(range, board_cards, nb);
+
+        bool has_disc = false;
+        for (int j = 0; j < 3; j++) if (d3[j] >= 0) { has_disc = true; break; }
+        if (has_disc) {
+            int board3_arr[3] = {b3[0], b3[1], b3[2]};
+            c_range_update_discard(range, d3, board3_arr);
+        }
+
+        int board5[5] = {-1,-1,-1,-1,-1};
+        for (int j = 0; j < nb; j++) board5[j] = board_cards[j];
+        c_range_to_category_probs(range, board5, nb, 0.f, cats);
+    }
+}
+
 // ── Postflop C++ state machine ────────────────────────────────────────────────
 
 PostflopGame* c_postflop_alloc(int n) { return new PostflopGame[n](); }

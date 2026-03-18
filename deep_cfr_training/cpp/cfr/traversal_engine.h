@@ -136,7 +136,7 @@ static void advance_game(PostflopGame* g, const float* net_adv, std::mt19937* rn
             if (chosen >= 0 && f.state.street > 0) {
                 int vis_n = std::min(f.state.street + 2, 5);
                 range_update_betting(g->opp_range, g->community, vis_n, chosen >= 3);
-                _validate_range(g->opp_range, "advance_game:opp_range_after_opp_act");
+                _VALIDATE_RANGE_HOT(g->opp_range, "advance_game:opp_range_after_opp_act");
             }
         }
     }
@@ -178,7 +178,7 @@ static void advance_game(PostflopGame* g, const float* net_adv, std::mt19937* rn
         if (f.is_traversing && f.state.street > 0) {
             if (f.action_idx == 0) {
                 // First action: snapshot my_range before any update
-                _validate_range(g->my_range, "advance_game:my_range_before_snap");
+                _VALIDATE_RANGE_HOT(g->my_range, "advance_game:my_range_before_snap");
                 std::memcpy(f.my_range_snap, g->my_range, sizeof(float) * 351);
             } else {
                 // Subsequent actions: restore from snapshot, then update for this action
@@ -186,7 +186,7 @@ static void advance_game(PostflopGame* g, const float* net_adv, std::mt19937* rn
             }
             int vis_n = std::min(f.state.street + 2, 5);
             range_update_betting(g->my_range, g->community, vis_n, f.valid[f.action_idx] >= 3);
-            _validate_range(g->my_range, "advance_game:my_range_after_traversing_act");
+            _VALIDATE_RANGE_HOT(g->my_range, "advance_game:my_range_after_traversing_act");
         }
 
         int action = f.valid[f.action_idx++];

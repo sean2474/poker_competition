@@ -193,95 +193,118 @@ def traverse_coro(trainer, state, p0_hand, p1_hand, p0_hand5, p1_hand5,
     return float(postflop_ev)
 
 
+# Keep-pair index lookup: for chosen (ai,aj), which cards are discarded?
+_KP_DISC = [[k for k in range(5) if k not in (ai, aj)]
+             for ai, aj in [(i,j) for i in range(5) for j in range(i+1,5)]]
+
+
 def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
     """
     Phase 2/3: replace fast_discard with DiscardCFR choices.
 
-    Vectorized: builds ALL (N×10) pair features at once and runs
-    TWO batched DiscardNet forwards (one for A, one for B) instead
-    of 2N separate calls.  ~10x faster than the per-game loop.
+    Fully batched: pair features built by C++ (OpenMP), context built by numpy.
+    Two DiscardNet forwards on contiguous arrays. No Python-level game loop.
     """
-    import ctypes
     import torch
-    from discard_cfr.features import KEEP_PAIRS as DK_PAIRS, opp_cats_narrowed, \
-        PAIR_DIM, CTX_DIM
+    from discard_cfr.features import KEEP_PAIRS as DK_PAIRS, PAIR_DIM, CTX_DIM
     from game.features import _c_lib
+    import ctypes
 
-    N       = len(p0h5)
-    FDIM    = PAIR_DIM + CTX_DIM   # 44
-    p0h     = np.zeros((N, 2), dtype=np.int32)
-    p1h     = np.zeros((N, 2), dtype=np.int32)
-    p0d     = np.full((N, 3), -1, dtype=np.int32)
-    p1d     = np.full((N, 3), -1, dtype=np.int32)
-    feats_A = np.zeros((N * 10, FDIM), dtype=np.float32)
-    feats_B = np.zeros((N * 10, FDIM), dtype=np.float32)
+    N     = len(p0h5)
+    FDIM  = PAIR_DIM + CTX_DIM   # 44
+    PDIM  = 23                   # C++ pair-feature dim (matches _DISCARD_PAIR_DIM)
 
-    # Pre-build pair features (categories + ranks + blockers) for each game
-    for i in range(N):
-        h5A = list(p0h5[i]); h5B = list(p1h5[i])
-        b3  = list(comms[i][:3])
-        n   = sum(1 for c in b3 if c >= 0)
-        brd = (ctypes.c_int * 5)(*[int(b3[j]) if j < n else -1 for j in range(5)])
-        tmp = (ctypes.c_float * 4)()
-        brs = np.array([(c % 9) / 8. if c >= 0 else 0. for c in b3], dtype=np.float32)
+    p0h   = np.zeros((N, 2), dtype=np.int32)
+    p1h   = np.zeros((N, 2), dtype=np.int32)
+    p0d   = np.full((N, 3), -1, dtype=np.int32)
+    p1d   = np.full((N, 3), -1, dtype=np.int32)
 
-        for k, (ai, aj) in enumerate(DK_PAIRS):
-            for h5, fs in [(h5A, feats_A), (h5B, feats_B)]:
-                c0, c1 = h5[ai], h5[aj]
-                cat = _c_lib.c_classify_hand(c0, c1, brd, n)
-                cat_oh = np.zeros(17, dtype=np.float32); cat_oh[cat] = 1.
-                hi = max(c0 % 9, c1 % 9) / 8.; lo = min(c0 % 9, c1 % 9) / 8.
-                _c_lib.c_blocker_flags(c0, c1, brd, n, tmp)
-                fs[i*10+k, :PAIR_DIM] = np.concatenate([cat_oh, [hi, lo], list(tmp)])
+    # ── Step 1: batch pair features via single C++ call ───────────────────────
+    pair_A = np.zeros((N * 10, PDIM), dtype=np.float32)
+    pair_B = np.zeros((N * 10, PDIM), dtype=np.float32)
+    boards3 = np.ascontiguousarray(comms[:, :3], dtype=np.int32)
+    _c_lib.c_build_discard_pair_features_batch(
+        ctypes.c_int(N),
+        np.ascontiguousarray(p0h5, dtype=np.int32).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        np.ascontiguousarray(p1h5, dtype=np.int32).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        boards3.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        pair_A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        pair_B.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
 
-        # Player A context: uniform opp range (is_bb=False)
-        oc_A = np.ones(17, dtype=np.float32) / 17
-        ctx_A = np.concatenate([brs, oc_A, [0.]])
-        feats_A[i*10:(i+1)*10, PAIR_DIM:] = ctx_A
+    # ── Step 2: board rank context (vectorized numpy) ─────────────────────────
+    brs = np.where(boards3 >= 0, boards3 % 9 / 8., 0.).astype(np.float32)  # [N,3]
+    brs_rep = np.repeat(brs, 10, axis=0)   # [N*10, 3]
 
-        # Player B context: uniform placeholder (updated after sampling A)
-        ctx_B = np.concatenate([brs, np.ones(17, dtype=np.float32)/17, [1.]])
-        feats_B[i*10:(i+1)*10, PAIR_DIM:] = ctx_B
+    # ── Step 3: build feats_A with uniform opp context ────────────────────────
+    feats_A = np.empty((N * 10, FDIM), dtype=np.float32)
+    feats_A[:, :PDIM] = pair_A
+    feats_A[:, PDIM:PDIM+3]  = brs_rep
+    feats_A[:, PDIM+3:PDIM+20] = 1.0 / 17  # uniform opp cats
+    feats_A[:, PDIM+20] = 0.              # is_bb=False for player A
 
-    # ── Batch forward: Player A ───────────────────────────────────────────────
-    # Thread-safe: deepcopy net to CPU so run_iter's net.cpu() can't corrupt us
+    # ── Step 4: DiscardNet forward for Player A (CPU, thread-safe copy) ───────
     import copy
     net = copy.deepcopy(discard_trainer.net).cpu().eval()
     with torch.no_grad():
-        adv_A = net(torch.from_numpy(feats_A).float()).numpy()  # (N*10,) on CPU
+        adv_A = net(torch.from_numpy(feats_A)).numpy()   # (N*10,)
+
+    # ── Step 5: sample Player A discards (vectorized) ─────────────────────────
+    adv_A_reshaped = adv_A.reshape(N, 10)
+    pos_A = np.maximum(adv_A_reshaped, 0.)
+    sums_A = pos_A.sum(axis=1, keepdims=True)
+    strat_A = np.where(sums_A > 0, pos_A / sums_A, 1./10)
+    strat_A /= strat_A.sum(axis=1, keepdims=True)  # renorm for floating point
+    # Sample using cumsum trick (vectorized, avoids Python loop)
+    r_A = _rng.random((N,))
+    cumA = np.cumsum(strat_A.astype(np.float64), axis=1)
+    ka_arr = (r_A[:, None] > cumA).sum(axis=1).clip(0, 9)
 
     for i in range(N):
-        h5A  = list(p0h5[i])
-        pos  = np.maximum(adv_A[i*10:(i+1)*10], 0.)
-        sA   = pos / pos.sum() if pos.sum() > 0 else np.ones(10)/10
-        sA   = sA.astype(np.float64); sA /= sA.sum()
-        ka   = int(_rng.choice(10, p=sA))
+        ka = int(ka_arr[i])
         ai, aj = DK_PAIRS[ka]
+        h5A = p0h5[i]
         p0h[i] = [h5A[ai], h5A[aj]]
-        p0d[i] = [h5A[k] for k in range(5) if k not in (ai, aj)]
+        p0d[i] = [h5A[k] for k in _KP_DISC[ka]]
 
-    # Update Player B ctx with actual opp_cats (now that p0d is known)
-    for i in range(N):
-        h5B = list(p1h5[i])
-        b3  = list(comms[i][:3])
-        brs = np.array([(c % 9) / 8. if c >= 0 else 0. for c in b3], dtype=np.float32)
-        oc_B = opp_cats_narrowed(h5B, b3, list(p0d[i]))
-        ctx_B = np.concatenate([brs, oc_B, [1.]])
-        feats_B[i*10:(i+1)*10, PAIR_DIM:] = ctx_B
+    # ── Step 6: Player B context — opp cats from C++ batch ────────────────────
+    opp_cats_B = np.empty((N, 17), dtype=np.float32)
+    _c_lib.c_opp_cats_narrowed_batch(
+        ctypes.c_int(N),
+        np.ascontiguousarray(p1h5, dtype=np.int32).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        boards3.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        np.ascontiguousarray(p0d, dtype=np.int32).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        opp_cats_B.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+    opp_cats_B_rep = np.repeat(opp_cats_B, 10, axis=0)  # [N*10, 17]
 
-    # ── Batch forward: Player B (use same CPU net copy) ──────────────────────
+    # ── Step 7: build feats_B with actual opp context ─────────────────────────
+    feats_B = np.empty((N * 10, FDIM), dtype=np.float32)
+    feats_B[:, :PDIM] = pair_B
+    feats_B[:, PDIM:PDIM+3]   = brs_rep
+    feats_B[:, PDIM+3:PDIM+20] = opp_cats_B_rep
+    feats_B[:, PDIM+20] = 1.              # is_bb=True for player B
+
+    # ── Step 8: DiscardNet forward for Player B ────────────────────────────────
     with torch.no_grad():
-        adv_B = net(torch.from_numpy(feats_B).float()).numpy()
+        adv_B = net(torch.from_numpy(feats_B)).numpy()   # (N*10,)
+
+    # ── Step 9: sample Player B discards (vectorized) ─────────────────────────
+    adv_B_reshaped = adv_B.reshape(N, 10)
+    pos_B = np.maximum(adv_B_reshaped, 0.)
+    sums_B = pos_B.sum(axis=1, keepdims=True)
+    strat_B = np.where(sums_B > 0, pos_B / sums_B, 1./10)
+    strat_B /= strat_B.sum(axis=1, keepdims=True)
+    r_B = _rng.random((N,))
+    cumB = np.cumsum(strat_B.astype(np.float64), axis=1)
+    kb_arr = (r_B[:, None] > cumB).sum(axis=1).clip(0, 9)
 
     for i in range(N):
-        h5B  = list(p1h5[i])
-        pos  = np.maximum(adv_B[i*10:(i+1)*10], 0.)
-        sB   = pos / pos.sum() if pos.sum() > 0 else np.ones(10)/10
-        sB   = sB.astype(np.float64); sB /= sB.sum()
-        kb   = int(_rng.choice(10, p=sB))
+        kb = int(kb_arr[i])
         bi, bj = DK_PAIRS[kb]
+        h5B = p1h5[i]
         p1h[i] = [h5B[bi], h5B[bj]]
-        p1d[i] = [h5B[k] for k in range(5) if k not in (bi, bj)]
+        p1d[i] = [h5B[k] for k in _KP_DISC[kb]]
 
     return p0h, p1h, p0d, p1d
 

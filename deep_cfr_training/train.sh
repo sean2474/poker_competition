@@ -20,13 +20,13 @@ cd "$(dirname "$0")"
 echo "=== Building C++ library ==="
 cd cpp
 if [[ "$(uname)" == "Darwin" ]]; then
-    clang++ -O3 -shared -fPIC -std=c++17 \
+    clang++ -O3 -march=native -shared -fPIC -std=c++17 \
         -o libtraversal.dylib \
         traversal.cpp range/rangefinder.cpp \
         -lpthread
     echo "Built libtraversal.dylib"
 else
-    g++ -O3 -shared -fPIC -std=c++17 -fopenmp \
+    g++ -O3 -march=native -funroll-loops -shared -fPIC -std=c++17 -fopenmp \
         -o libtraversal.so \
         traversal.cpp range/rangefinder.cpp \
         -lpthread

@@ -9,8 +9,8 @@
 // ── C(27,2) = 351 hand pairs ──────────────────────────────────────────────────
 constexpr int N_HANDS = 351;
 
-// ── Range validity check (aborts on error) ────────────────────────────────────
-// Verifies: all values >= 0, sum in [0.99, 1.01], at least one value > 0.
+// ── Range validity check ───────────────────────────────────────────────────
+// Always-on version: called at init time (once per game, cheap).
 inline void _validate_range(const float* range, const char* ctx) {
     float s = 0.f;
     for (int i = 0; i < N_HANDS; i++) {
@@ -29,6 +29,13 @@ inline void _validate_range(const float* range, const char* ctx) {
         std::abort();
     }
 }
+// Hot-loop version: only active when compiled with -DRANGE_VALIDATION.
+// Calling _validate_range in the inner DFS loop costs ~80ms/iter at N=5000.
+#ifdef RANGE_VALIDATION
+#  define _VALIDATE_RANGE_HOT(r, ctx) _validate_range(r, ctx)
+#else
+#  define _VALIDATE_RANGE_HOT(r, ctx) ((void)0)
+#endif
 
 // ── Persistent range functions ────────────────────────────────────────────────
 // These replace Python range_tracker by keeping range state INSIDE C++ per game.

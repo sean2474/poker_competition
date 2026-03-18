@@ -124,6 +124,22 @@ _c_lib.c_postflop_get_pending_game_info.argtypes = [
     ctypes.POINTER(ctypes.c_int),  # game_idx_out   [cnt]
 ]
 _c_lib.c_postflop_get_pending_game_info.restype = ctypes.c_int
+# Batch discard feature builders (replaces N×10 individual ctypes calls)
+_c_lib.c_build_discard_pair_features_batch.argtypes = [
+    ctypes.c_int,                          # n
+    ctypes.POINTER(ctypes.c_int),          # hand5s_A [n*5]
+    ctypes.POINTER(ctypes.c_int),          # hand5s_B [n*5]
+    ctypes.POINTER(ctypes.c_int),          # boards3  [n*3]
+    ctypes.POINTER(ctypes.c_float),        # feats_A_pair_out [n*10*23]
+    ctypes.POINTER(ctypes.c_float),        # feats_B_pair_out [n*10*23]
+]
+_c_lib.c_opp_cats_narrowed_batch.argtypes = [
+    ctypes.c_int,                          # n
+    ctypes.POINTER(ctypes.c_int),          # hand5s_B  [n*5]
+    ctypes.POINTER(ctypes.c_int),          # boards3   [n*3]
+    ctypes.POINTER(ctypes.c_int),          # opp_disc3s [n*3]
+    ctypes.POINTER(ctypes.c_float),        # cats_out  [n*17]
+]
 # Hand category classification
 _c_lib.c_classify_hand.argtypes = [
     ctypes.c_int, ctypes.c_int,
