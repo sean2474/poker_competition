@@ -2,7 +2,7 @@
 # Deep CFR Training Script
 #
 # RunPod H200 (139GB) + 192vCPU:
-#   bash train.sh 1500 10000 262144 200 100 12 5000000
+#   bash train.sh 1500 20000 262144 200 100 48 5000000
 # RunPod H100 SXM5 (80GB) + 16+ vCPU:
 #   bash train.sh 1500 5000 131072 100 50 2 2000000
 # Local macOS (MPS):
@@ -10,11 +10,11 @@
 set -e
 
 ITERS=${1:-1500}
-TRAVERSALS=${2:-10000}
+TRAVERSALS=${2:-20000}
 BATCH_SIZE=${3:-262144}
 TRAIN_BATCHES=${4:-200}
 DISC_GAMES=${5:-100}
-N_TRAV_THREADS=${6:-12}
+N_TRAV_THREADS=${6:-48}
 BUFFER_SIZE=${7:-5000000}
 
 # C++ OpenMP: 8 threads per Python thread × 12 trav_threads × 2 players = 192 CPUs
@@ -59,7 +59,7 @@ python trainer.py \
     --discard-n-games "$DISC_GAMES"     \
     --n-trav-threads  "$N_TRAV_THREADS" \
     --buffer-size     "$BUFFER_SIZE"    \
-    --checkpoint-every 50               \
+    --checkpoint-every 300              \
     --output model/deep_cfr
 
 echo ""
