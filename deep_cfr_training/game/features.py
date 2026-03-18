@@ -124,6 +124,16 @@ _c_lib.c_postflop_get_pending_game_info.argtypes = [
     ctypes.POINTER(ctypes.c_int),  # game_idx_out   [cnt]
 ]
 _c_lib.c_postflop_get_pending_game_info.restype = ctypes.c_int
+# Batch discard EV matrix (replaces N×100 Python evaluate_showdown calls)
+_c_lib.c_compute_discard_ev_matrix_batch.argtypes = [
+    ctypes.c_int,                          # n
+    ctypes.POINTER(ctypes.c_int),          # hand5s_A [n*5]
+    ctypes.POINTER(ctypes.c_int),          # hand5s_B [n*5]
+    ctypes.POINTER(ctypes.c_int),          # boards3  [n*3]
+    ctypes.POINTER(ctypes.c_float),        # ev_out   [n*100]
+    ctypes.c_int,                          # n_mc
+    ctypes.c_uint,                         # seed
+]
 # Batch discard feature builders (replaces N×10 individual ctypes calls)
 _c_lib.c_build_discard_pair_features_batch.argtypes = [
     ctypes.c_int,                          # n

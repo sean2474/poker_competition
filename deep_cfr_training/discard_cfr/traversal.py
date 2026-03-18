@@ -131,25 +131,133 @@ def traverse_game(hand5_A, hand5_B, board3,
     return feats_A, adv_A, feats_B, adv_B
 
 
+_KP_IDX = np.array([[i, j] for i in range(5) for j in range(i+1, 5)], dtype=np.int32)  # [10,2]
+_DISC_IDX = np.array([[k for k in range(5) if k not in (i, j)]
+                       for i, j in [(a,b) for a in range(5) for b in range(a+1,5)]],
+                      dtype=np.int32)  # [10,3]
+
+
 def run_batch(hand5_As, hand5_Bs, boards5,
               net,
               iteration: float,
               n_mc: int = 8):
     """
-    Traverse N games. Returns flat (20N, 39) feats and (20N,) advs.
-    Each game contributes 10 A-samples + 10 B-samples = 20 total.
+    Fully vectorized traversal for N games.
+    Replaces N per-game Python loops with:
+      1 C++ EV matrix batch + 1 C++ pair feature batch +
+      1 C++ opp_cats batch + 2 large DiscardNet forwards.
+    Returns (20N, 44) feats and (20N,) advs.
     """
-    all_feats, all_advs = [], []
+    import ctypes, copy, torch
+    from game.features import _c_lib
+    from .features import KEEP_PAIRS, PAIR_DIM, CTX_DIM
 
-    for i in range(len(hand5_As)):
-        board3 = list(boards5[i][:3])
-        h5A    = list(hand5_As[i])
-        h5B    = list(hand5_Bs[i])
+    N     = len(hand5_As)
+    FDIM  = PAIR_DIM + CTX_DIM   # 44
+    PDIM  = 23                   # C++ pair-feature dim
 
-        ev_mat = compute_ev_matrix(h5A, h5B, board3, n_mc)
-        fA, aA, fB, aB = traverse_game(h5A, h5B, board3, net, ev_mat, iteration)
+    h5A = np.ascontiguousarray(hand5_As, dtype=np.int32)   # [N,5]
+    h5B = np.ascontiguousarray(hand5_Bs, dtype=np.int32)   # [N,5]
+    b3  = np.ascontiguousarray(boards5[:, :3], dtype=np.int32)  # [N,3]
 
-        all_feats.append(fA); all_advs.append(aA)
-        all_feats.append(fB); all_advs.append(aB)
+    # ── Step 1: EV matrices (C++ batch, OpenMP) ──────────────────────────────
+    ev_flat = np.zeros(N * 100, dtype=np.float32)
+    _c_lib.c_compute_discard_ev_matrix_batch(
+        ctypes.c_int(N),
+        h5A.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        h5B.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        b3.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        ev_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        ctypes.c_int(n_mc),
+        ctypes.c_uint(int(np.random.randint(0, 2**31))),
+    )
+    ev_mats = ev_flat.reshape(N, 10, 10)  # [N, ka, kb]
 
-    return np.concatenate(all_feats), np.concatenate(all_advs)  # (20N,44), (20N,)
+    # ── Step 2: Pair features (C++ batch) ─────────────────────────────────
+    pair_A = np.zeros((N * 10, PDIM), dtype=np.float32)
+    pair_B = np.zeros((N * 10, PDIM), dtype=np.float32)
+    _c_lib.c_build_discard_pair_features_batch(
+        ctypes.c_int(N),
+        h5A.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        h5B.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        b3.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        pair_A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        pair_B.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+    brs = np.where(b3 >= 0, b3 % 9 / 8., 0.).astype(np.float32)  # [N,3]
+
+    # ── Step 3: feats_A (uniform opp context) + Net forward A ────────────────
+    brs_10 = np.repeat(brs, 10, axis=0)  # [N*10, 3]
+    feats_A = np.empty((N * 10, FDIM), dtype=np.float32)
+    feats_A[:, :PDIM]          = pair_A
+    feats_A[:, PDIM:PDIM+3]   = brs_10
+    feats_A[:, PDIM+3:PDIM+20] = 1./17
+    feats_A[:, PDIM+20]        = 0.
+
+    net_cpu = copy.deepcopy(net).cpu().eval()
+    with torch.no_grad():
+        adv_A_flat = net_cpu(torch.from_numpy(feats_A)).numpy()  # [N*10]
+
+    pos_A = np.maximum(adv_A_flat.reshape(N, 10), 0.)
+    s_A   = pos_A.sum(axis=1, keepdims=True)
+    strat_A = np.where(s_A > 0, pos_A / np.where(s_A > 0, s_A, 1.), 1./10)
+    strat_A /= strat_A.sum(axis=1, keepdims=True)
+
+    # ── Step 4: A discard cards for all N*10 (game, ka) ───────────────────
+    # Vectorized: h5A[:, _DISC_IDX] -> [N,10,3]
+    a_disc = h5A[:, _DISC_IDX].reshape(N * 10, 3)  # [N*10, 3]
+
+    # ── Step 5: opp_cats_B for all N*10 (C++ batch) ──────────────────────
+    opp_cats_B = np.empty((N * 10, 17), dtype=np.float32)
+    h5B_rep = np.repeat(h5B, 10, axis=0)          # [N*10, 5]
+    b3_rep  = np.repeat(b3,  10, axis=0)           # [N*10, 3]
+    _c_lib.c_opp_cats_narrowed_batch(
+        ctypes.c_int(N * 10),
+        np.ascontiguousarray(h5B_rep).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        np.ascontiguousarray(b3_rep).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        np.ascontiguousarray(a_disc).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        opp_cats_B.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+
+    # ── Step 6: feats_B for N*100 (10 A-choices × 10 B-pairs) + Net forward B ──
+    pair_B_100 = np.repeat(pair_B, 10, axis=0)          # [N*100, PDIM]
+    brs_100    = np.repeat(brs_10, 10, axis=0)           # [N*100, 3]
+    oc_B_100   = np.repeat(opp_cats_B, 10, axis=0)       # [N*100, 17]
+    feats_B_all = np.empty((N * 100, FDIM), dtype=np.float32)
+    feats_B_all[:, :PDIM]          = pair_B_100
+    feats_B_all[:, PDIM:PDIM+3]   = brs_100
+    feats_B_all[:, PDIM+3:PDIM+20] = oc_B_100
+    feats_B_all[:, PDIM+20]        = 1.
+
+    with torch.no_grad():
+        adv_B_flat = net_cpu(torch.from_numpy(feats_B_all)).numpy()  # [N*100]
+
+    pos_B   = np.maximum(adv_B_flat.reshape(N * 10, 10), 0.)
+    s_B     = pos_B.sum(axis=1, keepdims=True)
+    strat_B = np.where(s_B > 0, pos_B / np.where(s_B > 0, s_B, 1.), 1./10)
+    strat_B /= strat_B.sum(axis=1, keepdims=True)
+    strat_B_ka = strat_B.reshape(N, 10, 10)  # [N, ka, kb]
+
+    # ── Step 7: adv_A via einsum ───────────────────────────────────────
+    ev_A    = np.einsum('ijk,ijk->ij', strat_B_ka, ev_mats)   # [N, 10]
+    cf_ev_A = np.einsum('ij,ij->i',   strat_A,    ev_A)       # [N]
+    adv_A   = (ev_A - cf_ev_A[:, None]).astype(np.float32)    # [N, 10]
+
+    # ── Step 8: sample ka_actual, compute adv_B ───────────────────────────
+    rng_np   = np.random.default_rng()
+    cumA     = np.cumsum(strat_A.astype(np.float64), axis=1)
+    ka_actual = (rng_np.random((N,))[:, None] > cumA).sum(axis=1).clip(0, 9)
+
+    idx       = np.arange(N)
+    strat_B_a = strat_B_ka[idx, ka_actual]          # [N, 10]
+    ev_B      = 1.0 - ev_mats[idx, ka_actual]        # [N, 10]
+    cf_ev_B   = np.einsum('ij,ij->i', strat_B_a, ev_B)  # [N]
+    adv_B     = (ev_B - cf_ev_B[:, None]).astype(np.float32)  # [N, 10]
+
+    # ── Step 9: pick feats_B_actual for ka_actual (vectorized index) ─────────
+    row_starts = (idx * 100 + ka_actual * 10)[:, None] + np.arange(10)[None, :]
+    feats_B_actual = feats_B_all[row_starts.flatten()]  # [N*10, 44]
+
+    all_feats = np.vstack([feats_A,         feats_B_actual])   # [2*N*10, 44]
+    all_advs  = np.concatenate([adv_A.flatten(), adv_B.flatten()])  # [2*N*10]
+    return all_feats, all_advs

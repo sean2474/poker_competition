@@ -157,6 +157,79 @@ void c_batch_warmup_ev(int n,
     }
 }
 
+// ── Discard EV matrix batch ───────────────────────────────────────────────────
+// Computes 10×10 ev_matrix[ka][kb] = P(A wins) for N games.
+// Replaces N×100 Python evaluate_showdown calls with a single OpenMP C++ batch.
+
+static constexpr int _KP[10][2] = {
+    {0,1},{0,2},{0,3},{0,4},{1,2},{1,3},{1,4},{2,3},{2,4},{3,4}
+};
+
+void c_compute_discard_ev_matrix_batch(
+    int n,
+    const int* hand5s_A,   // [n*5]
+    const int* hand5s_B,   // [n*5]
+    const int* boards3,    // [n*3]
+    float* ev_out,          // [n*100] row-major: ev_out[i*100 + ka*10 + kb]
+    int n_mc,              // MC samples per pair (0 = exact enum)
+    unsigned seed
+) {
+    #pragma omp parallel for schedule(static) if(n > 2)
+    for (int i = 0; i < n; i++) {
+        const int* h5A = hand5s_A + i * 5;
+        const int* h5B = hand5s_B + i * 5;
+        const int* b3  = boards3  + i * 3;
+        float*     ev  = ev_out   + i * 100;
+
+        bool in_b3[DECK_SIZE] = {};
+        for (int j = 0; j < 3; j++) if (b3[j] >= 0 && b3[j] < DECK_SIZE) in_b3[b3[j]] = true;
+
+        int board5[5] = {b3[0], b3[1], b3[2], -1, -1};
+        std::mt19937 rng(seed + (unsigned)i * 1337u);
+
+        for (int ka = 0; ka < 10; ka++) {
+            int p0[2] = {h5A[_KP[ka][0]], h5A[_KP[ka][1]]};
+            bool in_p0[DECK_SIZE] = {};
+            in_p0[p0[0]] = in_p0[p0[1]] = true;
+
+            for (int kb = 0; kb < 10; kb++) {
+                int p1[2] = {h5B[_KP[kb][0]], h5B[_KP[kb][1]]};
+
+                int pool[DECK_SIZE]; int n_pool = 0;
+                for (int c = 0; c < DECK_SIZE; c++) {
+                    if (!in_b3[c] && !in_p0[c] && c != p1[0] && c != p1[1])
+                        pool[n_pool++] = c;
+                }
+
+                if (n_pool < 2) { ev[ka * 10 + kb] = 0.5f; continue; }
+
+                int n_exact = n_pool * (n_pool - 1) / 2;
+                float wins = 0.f;
+
+                if (n_mc == 0 || n_exact <= 91) {
+                    for (int t = 0; t < n_pool - 1; t++)
+                        for (int r = t + 1; r < n_pool; r++) {
+                            board5[3] = pool[t]; board5[4] = pool[r];
+                            int sd = evaluate_showdown(p0, p1, board5);
+                            wins += (sd > 0) ? 1.f : (sd == 0) ? 0.5f : 0.f;
+                        }
+                    ev[ka * 10 + kb] = wins / n_exact;
+                } else {
+                    for (int m = 0; m < n_mc; m++) {
+                        int ti = (int)(rng() % (unsigned)n_pool);
+                        int ri = (int)(rng() % (unsigned)(n_pool - 1));
+                        if (ri >= ti) ri++;
+                        board5[3] = pool[ti]; board5[4] = pool[ri];
+                        int sd = evaluate_showdown(p0, p1, board5);
+                        wins += (sd > 0) ? 1.f : (sd == 0) ? 0.5f : 0.f;
+                    }
+                    ev[ka * 10 + kb] = wins / n_mc;
+                }
+            }
+        }
+    }
+}
+
 // ── Discard feature batch builders ───────────────────────────────────────────
 // Replace N×10×2 individual c_classify_hand / c_blocker_flags ctypes calls with
 // a single C++ call (200K ctypes calls/iter → 1 call).
