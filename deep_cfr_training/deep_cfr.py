@@ -66,7 +66,8 @@ class DeepCFR:
             num_batches:         int = 100,
             checkpoint_interval: int = 50,
             checkpoint_dir:      str = 'model',
-            discard_n_games:     int = 50):
+            discard_n_games:     int = 50,
+            n_trav_threads:      int = 1):
         runner = PhaseRunner(
             self,
             num_iterations      = num_iterations,
@@ -77,6 +78,7 @@ class DeepCFR:
             checkpoint_interval = checkpoint_interval,
             checkpoint_dir      = checkpoint_dir,
             discard_n_games     = discard_n_games,
+            n_trav_threads      = n_trav_threads,
         )
         runner.run()
 

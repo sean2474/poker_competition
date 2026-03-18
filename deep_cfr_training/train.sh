@@ -1,17 +1,24 @@
 #!/bin/bash
 # Deep CFR Training Script
 #
+# RunPod H200 (139GB) + 192vCPU:
+#   bash train.sh 1500 10000 262144 200 100 12 5000000
 # RunPod H100 SXM5 (80GB) + 16+ vCPU:
-#   bash train.sh 1500 1000 131072 50
+#   bash train.sh 1500 5000 131072 100 50 2 2000000
 # Local macOS (MPS):
-#   bash train.sh 50 200 4096 5
+#   bash train.sh 50 200 4096 5 20 1 500000
 set -e
 
 ITERS=${1:-1500}
-TRAVERSALS=${2:-5000}
-BATCH_SIZE=${3:-65536}
-TRAIN_BATCHES=${4:-50}
-DISC_GAMES=${5:-50}
+TRAVERSALS=${2:-10000}
+BATCH_SIZE=${3:-262144}
+TRAIN_BATCHES=${4:-200}
+DISC_GAMES=${5:-100}
+N_TRAV_THREADS=${6:-12}
+BUFFER_SIZE=${7:-5000000}
+
+# C++ OpenMP: 8 threads per Python thread × 12 trav_threads × 2 players = 192 CPUs
+export OMP_NUM_THREADS=8
 
 cd "$(dirname "$0")"
 
@@ -45,12 +52,14 @@ echo "  TrainBatches=$TRAIN_BATCHES  DiscardGames=$DISC_GAMES"
 echo ""
 
 python trainer.py \
-    --iterations    "$ITERS"         \
-    --traversals    "$TRAVERSALS"    \
-    --batch-size    "$BATCH_SIZE"    \
-    --train-batches "$TRAIN_BATCHES" \
-    --discard-n-games "$DISC_GAMES"  \
-    --checkpoint-every 50            \
+    --iterations      "$ITERS"          \
+    --traversals      "$TRAVERSALS"     \
+    --batch-size      "$BATCH_SIZE"     \
+    --train-batches   "$TRAIN_BATCHES"  \
+    --discard-n-games "$DISC_GAMES"     \
+    --n-trav-threads  "$N_TRAV_THREADS" \
+    --buffer-size     "$BUFFER_SIZE"    \
+    --checkpoint-every 50               \
     --output model/deep_cfr
 
 echo ""

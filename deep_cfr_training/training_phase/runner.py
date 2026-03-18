@@ -48,7 +48,8 @@ class PhaseRunner:
                  num_batches:         int = 100,
                  checkpoint_interval: int = 50,
                  checkpoint_dir:      str = 'model',
-                 discard_n_games:     int = 50):
+                 discard_n_games:     int = 50,
+                 n_trav_threads:      int = 1):
 
         self.state               = trainer_state
         self.num_iterations      = num_iterations
@@ -59,6 +60,7 @@ class PhaseRunner:
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_dir      = checkpoint_dir
         self.discard_n_games     = discard_n_games
+        self.n_trav_threads      = n_trav_threads
 
         # ── Model instances ───────────────────────────────────────────────
         self.preflop_cfr  = None   # always PreflopCFR (bound after init)
@@ -185,36 +187,43 @@ class PhaseRunner:
             if in_phase2:
                 phase2_local += 1
 
-            # ── Traversal (parallel: player 0 and 1 simultaneously) ────────
-            buf_cap = self.state.adv_buffers[0].capacity
+            # ── Traversal (parallel: n_trav_threads per player) ────────────
+            buf_cap   = self.state.adv_buffers[0].capacity
+            n_threads = self.n_trav_threads
+            # Each thread handles traversals_per_iter // n_threads games
+            per_thread = max(1, self.traversals_per_iter // n_threads)
 
-            # Temp buffers per thread (avoids race conditions on shared buffers)
+            # Temp buffers: n_threads per player × 2 players
+            total_threads = n_threads * 2  # 0..n_threads-1 = tp0, n_threads..2n-1 = tp1
             tmp_adv = [[ReservoirBuffer(buf_cap), ReservoirBuffer(buf_cap)]
-                       for _ in range(2)]   # tmp_adv[traversing][player]
-            tmp_str = [ReservoirBuffer(buf_cap) for _ in range(2)]
+                       for _ in range(total_threads)]
+            tmp_str = [ReservoirBuffer(buf_cap) for _ in range(total_threads)]
 
-            def _run_trav(traversing):
+            def _run_trav(thread_idx, traversing):
                 self.postflop_cfr.run_traversals(
-                    self.traversals_per_iter, traversing,
+                    per_thread, traversing,
                     discard_trainer  = dt_for_traversal,
                     discard_n_games  = self.discard_n_games,
                     phase            = self._phase_idx + 1,
-                    adv_bufs         = tmp_adv[traversing],
-                    str_buf          = tmp_str[traversing],
+                    adv_bufs         = tmp_adv[thread_idx],
+                    str_buf          = tmp_str[thread_idx],
                 )
 
             inner.reset(total=self.traversals_per_iter * 2)
-            inner.set_description(f'P{self._phase_idx+1} Trav 0+1 ‖')
-            threads = [threading.Thread(target=_run_trav, args=(tp,))
-                       for tp in range(2)]
+            inner.set_description(f'P{self._phase_idx+1} Trav×{n_threads*2}')
+            threads = []
+            for tp in range(2):
+                for j in range(n_threads):
+                    idx = tp * n_threads + j
+                    threads.append(threading.Thread(target=_run_trav, args=(idx, tp)))
             for th in threads: th.start()
             for th in threads: th.join()
 
-            # Merge temp buffers → real trainer buffers (sequential, safe)
-            for traversing in range(2):
+            # Merge all temp buffers → real trainer buffers (sequential, safe)
+            for idx in range(total_threads):
                 for p in range(2):
-                    self.state.adv_buffers[p].merge_from(tmp_adv[traversing][p])
-                self.state.strategy_buffer.merge_from(tmp_str[traversing])
+                    self.state.adv_buffers[p].merge_from(tmp_adv[idx][p])
+                self.state.strategy_buffer.merge_from(tmp_str[idx])
             inner.refresh()
 
             # ── Phase 2: collect discard samples BEFORE training ─────────────

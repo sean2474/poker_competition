@@ -26,6 +26,8 @@ def main():
     parser.add_argument('--checkpoint-every', type=int,   default=50)
     parser.add_argument('--discard-n-games',  type=int,   default=50,
                         help='games per iter for discard CFR training')
+    parser.add_argument('--n-trav-threads',   type=int,   default=1,
+                        help='parallel traversal threads per player (use nCPU/8 on H200)')
     _default = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'model', 'deep_cfr')
     parser.add_argument('--output', type=str, default=_default)
@@ -43,6 +45,7 @@ def main():
         checkpoint_interval = args.checkpoint_every,
         checkpoint_dir      = os.path.dirname(args.output),
         discard_n_games     = args.discard_n_games,
+        n_trav_threads      = args.n_trav_threads,
     )
     trainer.export(args.output)
 
