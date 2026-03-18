@@ -191,8 +191,8 @@ class PhaseRunner:
             inner.set_description(f'P{self._phase_idx+1} Trav 0+1 ‖')
             threads = [threading.Thread(target=_run_trav, args=(tp,))
                        for tp in range(2)]
-            for t in threads: t.start()
-            for t in threads: t.join()
+            for th in threads: th.start()
+            for th in threads: th.join()
 
             # Merge temp buffers → real trainer buffers (sequential, safe)
             for traversing in range(2):
