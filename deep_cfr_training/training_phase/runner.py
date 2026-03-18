@@ -181,8 +181,10 @@ class PhaseRunner:
             # Phase 3: discard trains jointly with postflop
             in_phase2 = (self._phase_idx == 1)
             in_phase3 = (self._phase_idx == 2)
-            dt_for_traversal = (self.state.discard_trainer
-                                if in_phase3 else None)
+            # Always None: use heuristic discard during DFS traversal.
+            # Discard CFR trains separately via run_iter (below), avoiding
+            # GPU inference inside each DFS round which causes growing slowdown.
+            dt_for_traversal = None
 
             if in_phase2:
                 phase2_local += 1
