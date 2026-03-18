@@ -457,7 +457,7 @@ int c_postflop_collect_pending(PostflopGame* games, int n,
 void c_postflop_resume_batch(PostflopGame* games, const int* game_idxs,
                               const float* net_advs, int n_pending, unsigned int base_seed)
 {
-    #pragma omp parallel for schedule(dynamic) if(n_pending > 2000)
+    #pragma omp parallel for schedule(dynamic) if(n_pending > 200)
     for(int j=0;j<n_pending;j++){
         int i=game_idxs[j]; std::mt19937 rng(base_seed+(unsigned)i*997);
         advance_game(&games[i], net_advs+j*NUM_ACTIONS, &rng);
