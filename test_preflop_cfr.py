@@ -196,7 +196,7 @@ def main():
     parser.add_argument('--hands',   type=int, default=300)
     parser.add_argument('--rounds',  type=int, default=5)
     parser.add_argument('--workers', type=int, default=min(cpu_count(), 10))
-    parser.add_argument('--pkl', default='deep_cfr_training/model/preflop.pkl')
+    parser.add_argument('--pkl', default='deep_cfr_training/models/preflop.pkl')
     args = parser.parse_args()
 
     with open(args.pkl, 'rb') as f:
