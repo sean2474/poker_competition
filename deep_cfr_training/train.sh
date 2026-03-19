@@ -33,7 +33,16 @@ N_WORKERS="${N_WORKERS:-$(python3 -c 'import os; print(os.cpu_count())')}"
 # ── Compile C++ prob agent ─────────────────────────────────────────────────────
 if [ "$COMPILE" = true ]; then
     echo "==> Compiling cpp/prob_agent.cpp ..."
-    clang++ -O3 -std=c++17 -shared -fPIC \
+    if command -v clang++ &>/dev/null; then
+        CXX=clang++
+    elif command -v g++ &>/dev/null; then
+        CXX=g++
+    else
+        echo "ERROR: no C++ compiler found (clang++ or g++ required)" >&2
+        exit 1
+    fi
+    echo "    Using compiler: $CXX"
+    $CXX -O3 -std=c++17 -shared -fPIC \
         -o cpp/prob_agent.so \
         cpp/prob_agent.cpp
     echo "    Built: cpp/prob_agent.so"
