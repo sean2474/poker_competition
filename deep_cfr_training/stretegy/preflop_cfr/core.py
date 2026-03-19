@@ -97,7 +97,7 @@ class Preflop(PreflopModel):
 
     def train(self, n_iters: int = 200_000, save_path: str = None,
               discard_sims: int = 20, n_workers: int = 1,
-              terminal_fn=None, **kwargs):
+              terminal_fn=None, checkpoint_path: str = None, **kwargs):
         from .train import train as _train_fn
         result = _train_fn(
             n_iters=n_iters, save_path=save_path,
@@ -109,6 +109,8 @@ class Preflop(PreflopModel):
         self._chart     = result._chart
         self._regrets   = result._regrets
         self._strat_sum = result._strat_sum
+        if checkpoint_path:
+            self.save_checkpoint(checkpoint_path)
 
     # ── Save / Load ───────────────────────────────────────────────────────────
 
@@ -122,3 +124,23 @@ class Preflop(PreflopModel):
         with open(path, 'rb') as f:
             self._chart = pickle.load(f)
         print(f'loaded {len(self._chart)} infosets from {path}')
+
+    def save_checkpoint(self, path: str):
+        """Save full training state (chart + regrets + strat_sum) for resumption."""
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump({
+                'chart':     self._chart,
+                'regrets':   self._regrets,
+                'strat_sum': self._strat_sum,
+            }, f)
+        print(f'checkpoint saved ({len(self._strat_sum)} infosets) → {path}')
+
+    def load_checkpoint(self, path: str):
+        """Load full training state for resumption."""
+        with open(path, 'rb') as f:
+            ckpt = pickle.load(f)
+        self._chart     = ckpt['chart']
+        self._regrets   = ckpt['regrets']
+        self._strat_sum = ckpt['strat_sum']
+        print(f'checkpoint loaded ({len(self._strat_sum)} infosets) from {path}')

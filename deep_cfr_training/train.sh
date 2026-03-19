@@ -28,7 +28,6 @@ fi
 PREFLOP_ITERS="${PREFLOP_ITERS:-200000}"
 DISCARD_HANDS="${DISCARD_HANDS:-5000}"
 DISCARD_EPOCHS="${DISCARD_EPOCHS:-100}"
-DISCARD_SIMS="${DISCARD_SIMS:-50}"
 N_WORKERS="${N_WORKERS:-$(python3 -c 'import os; print(os.cpu_count())')}"
 
 # ── Compile C++ prob agent ─────────────────────────────────────────────────────
@@ -52,14 +51,13 @@ fi
 # ── Run training ───────────────────────────────────────────────────────────────
 echo "==> Starting training: phase=$PHASE"
 echo "    PREFLOP_ITERS=$PREFLOP_ITERS  N_WORKERS=$N_WORKERS"
-echo "    DISCARD_HANDS=$DISCARD_HANDS  DISCARD_EPOCHS=$DISCARD_EPOCHS  DISCARD_SIMS=$DISCARD_SIMS"
+echo "    DISCARD_HANDS=$DISCARD_HANDS  DISCARD_EPOCHS=$DISCARD_EPOCHS"
 echo ""
 
 python train.py "$PHASE" \
     --iters   "$PREFLOP_ITERS" \
     --hands   "$DISCARD_HANDS" \
     --epochs  "$DISCARD_EPOCHS" \
-    --sims    "$DISCARD_SIMS" \
     --workers "$N_WORKERS"
 
 echo ""
