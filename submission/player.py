@@ -28,6 +28,7 @@ from gym_env import PokerEnv
 from action import DISCARD, FOLD, RAISE, CHECK, CALL, StrategyNet, DiscardNet
 from strategy.preflop      import preflop_action, size_bucket, canonicalize
 from strategy.discard      import decide_discard
+from strategy.discard_ev   import decide_discard_ev
 from strategy.postflop     import postflop_action
 from strategy.range_tracker import OppRangeTracker
 
@@ -168,7 +169,13 @@ class PlayerAgent(Agent):
 
         # ── Discard ───────────────────────────────────────────────────────────
         if v[DISCARD]:
-            result = decide_discard(obs, self._discard_net)
+            # Compute preflop-action-updated range for discard EV
+            hand5 = [c for c in obs['my_cards'] if c >= 0]
+            board3 = [c for c in obs.get('community_cards', []) if c >= 0][:3]
+            dead   = hand5 + board3
+            opp_probs = self._opp_range.get_probs_for_discard(
+                self._preflop_chart, canonicalize, dead, n_completions=10)
+            result = decide_discard_ev(obs, opp_probs=opp_probs)
             self._my_disc = [c for c in obs['my_cards'] if c >= 0
                              and c not in (obs['my_cards'][result[2]],
                                           obs['my_cards'][result[3]])]

@@ -84,6 +84,59 @@ class OppRangeTracker:
 
         self._pf_pending = []
 
+    def get_probs_for_discard(self, chart, canonicalize,
+                               dead_cards: list, n_completions: int = 40) -> np.ndarray:
+        """
+        Return a range distribution adjusted for preflop actions, for use at
+        discard time (before opp discards are known).
+
+        Does NOT modify _probs.  Instead samples 5-card completions for each
+        valid 2-card pair to compute marginal P(pf_action | pair), returning
+        a temporary weighted distribution for EV computation.
+
+        dead_cards: our 5 cards + 3 board cards (8 total).
+        n_completions: MC samples per pair (higher = more accurate, ~40 is fast).
+        """
+        if self._probs is None:
+            return None
+        if not self._pf_pending:
+            return self._probs.copy()
+
+        dead_set  = set(int(c) for c in dead_cards if c >= 0)
+        available = [c for c in range(27) if c not in dead_set]
+        probs     = self._probs.copy()
+
+        for slot, bkt, hist in self._pf_pending:
+            weights = np.ones(len(_ALL_PAIRS), dtype=np.float32)
+            for i, (c0, c1) in enumerate(_ALL_PAIRS):
+                if probs[i] < 1e-9:
+                    continue
+                if c0 in dead_set or c1 in dead_set:
+                    weights[i] = 0.
+                    continue
+                pool = [c for c in available if c != c0 and c != c1]
+                if len(pool) < 3:
+                    weights[i] = 1. / 3
+                    continue
+                total = 0.0
+                for _ in range(n_completions):
+                    extras = np.random.choice(pool, 3, replace=False).tolist()
+                    hand5  = [c0, c1] + extras
+                    key    = (canonicalize(hand5), bkt, hist)
+                    strat  = chart.get(key)
+                    if strat is not None and strat.sum() > 0:
+                        total += float(strat[slot]) / float(strat.sum())
+                    else:
+                        total += 1. / 3
+                weights[i] = max(total / n_completions, 1e-6)
+
+            new = probs * weights
+            s   = new.sum()
+            if s > 1e-9:
+                probs = new / s
+
+        return probs
+
     # ── Discard ───────────────────────────────────────────────────────────────
 
     def update_discard(self, opp_disc: list):
