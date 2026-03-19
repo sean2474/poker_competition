@@ -15,6 +15,7 @@
 
 set -e
 cd "$(dirname "$0")"
+export PYTHONPATH="$(dirname "$(pwd)"):$PYTHONPATH"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 PHASE="${1:-all}"
