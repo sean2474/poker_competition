@@ -8,6 +8,7 @@ Terminal values come from prob-agent self-play:
 
 import random
 import numpy as np
+from tqdm import tqdm
 
 from preflop_cfr.core  import Preflop
 from preflop_cfr.state import _State
@@ -96,40 +97,117 @@ def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
                     regrets, strat_sum, t, rng, heuristic, discard_sims)
 
 
+# ── Parallel worker (module-level for multiprocessing spawn) ──────────────────
+
+def _worker_fn(args):
+    """Run N iters of MCCFR independently. Returns strat_sum dict."""
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    worker_id, n_iters, discard_sims = args
+
+    from preflop_cfr.state  import _State
+    from preflop_cfr.utils  import _SLOT, _match
+    from game.game          import DECK_SIZE, canonicalize
+    from heuristic.prob_agent import HeuristicAgent
+
+    heuristic  = HeuristicAgent()
+    regrets    = {}
+    strat_sum  = {}
+    rng        = random.Random(worker_id * 97651 + 42)
+
+    for t in tqdm(range(1, n_iters + 1), desc=f'worker {worker_id}',
+                  position=worker_id, leave=True, ncols=80):
+        deck = list(range(DECK_SIZE))
+        rng.shuffle(deck)
+        h0, h1 = tuple(deck[:5]), tuple(deck[5:10])
+        for tp in [0, 1]:
+            _cfr(h0, h1, _State(), tp,
+                 regrets, strat_sum, t, rng,
+                 heuristic, discard_sims)
+
+    return strat_sum
+
+
+def _merge_strat_sums(results: list) -> dict:
+    """Sum strat_sum arrays from all workers → correct average strategy."""
+    merged = {}
+    for ss in results:
+        for key, arr in ss.items():
+            if key in merged:
+                merged[key] = merged[key] + arr
+            else:
+                merged[key] = arr.copy()
+    return merged
+
+
 # ── Main training function ────────────────────────────────────────────────────
 
 def train(n_iters: int = 200_000, save_path: str = None,
-          discard_sims: int = 20, log_every: int = None) -> Preflop:
+          discard_sims: int = 20, log_every: int = None,
+          n_workers: int = 1) -> Preflop:
     """
     Run external-sampling MCCFR for preflop.
 
     Args:
-        n_iters:      number of MCCFR iterations
+        n_iters:      total MCCFR iterations (split across workers)
         save_path:    where to save the trained chart (.pkl)
         discard_sims: MC sims per keep-pair in discard simulation
-        log_every:    print progress every N iters (default: n_iters // 10)
+        log_every:    print progress every N iters (single-worker only)
+        n_workers:    number of parallel processes (default 1 = single-threaded)
     """
+    if n_workers > 1:
+        return _train_parallel(n_iters, save_path, discard_sims, n_workers)
+
     from heuristic.prob_agent import get_heuristic_agent
 
-    log_every = log_every or max(1, n_iters // 10)
     heuristic = get_heuristic_agent()
     rng = random.Random()
     p   = Preflop()
 
-    for t in range(1, n_iters + 1):
-        deck = list(range(DECK_SIZE))
-        rng.shuffle(deck)
-        h0, h1 = tuple(deck[:5]), tuple(deck[5:10])
+    with tqdm(range(1, n_iters + 1), desc='preflop MCCFR', ncols=80) as bar:
+        for t in bar:
+            deck = list(range(DECK_SIZE))
+            rng.shuffle(deck)
+            h0, h1 = tuple(deck[:5]), tuple(deck[5:10])
 
-        for tp in [0, 1]:
-            _cfr(h0, h1, _State(), tp,
-                 p._regrets, p._strat_sum, t, rng,
-                 heuristic, discard_sims)
+            for tp in [0, 1]:
+                _cfr(h0, h1, _State(), tp,
+                     p._regrets, p._strat_sum, t, rng,
+                     heuristic, discard_sims)
 
-        if t % log_every == 0:
-            print(f'iter {t}/{n_iters}  infosets={len(p._strat_sum)}')
+            if t % max(1, n_iters // 20) == 0:
+                bar.set_postfix(infosets=len(p._strat_sum))
 
     p._build_chart()
+    if save_path:
+        p.save(save_path)
+    return p
+
+
+def _train_parallel(n_iters: int, save_path: str, discard_sims: int,
+                    n_workers: int) -> Preflop:
+    from multiprocessing import Pool
+
+    iters_per = n_iters // n_workers
+    remainder = n_iters - iters_per * n_workers
+
+    # Last worker gets the remainder iterations
+    work = [(i, iters_per + (remainder if i == n_workers - 1 else 0), discard_sims)
+            for i in range(n_workers)]
+
+    print(f'[parallel] {n_workers} workers × ~{iters_per} iters = {n_iters} total')
+
+    with Pool(processes=n_workers) as pool:
+        results = pool.map(_worker_fn, work)
+
+    print(f'[parallel] merging {n_workers} strat_sum dicts ...')
+    merged = _merge_strat_sums(results)
+
+    p = Preflop()
+    p._strat_sum = merged
+    p._build_chart()
+    print(f'[parallel] total infosets={len(p._chart)}')
     if save_path:
         p.save(save_path)
     return p

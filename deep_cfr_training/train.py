@@ -22,11 +22,11 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 # ── Preflop ───────────────────────────────────────────────────────────────────
 
 def train_preflop(n_iters: int = 200_000, save_path: str = None,
-                  discard_sims: int = 20):
+                  discard_sims: int = 20, n_workers: int = 1):
     from preflop_cfr.train import train as _train_preflop
     save_path = save_path or os.path.join(MODELS_DIR, 'preflop.pkl')
     return _train_preflop(n_iters=n_iters, save_path=save_path,
-                          discard_sims=discard_sims)
+                          discard_sims=discard_sims, n_workers=n_workers)
 
 def train_discard():
     """Placeholder — postflop Deep CFR training."""
@@ -59,10 +59,11 @@ if __name__ == '__main__':
     p.add_argument('--hands',   type=int, default=5_000,   help='discard training hands')
     p.add_argument('--epochs',  type=int, default=100,     help='discard training epochs')
     p.add_argument('--sims',    type=int, default=50,      help='MC sims per EV estimate')
+    p.add_argument('--workers', type=int, default=1,       help='parallel worker processes for preflop')
     args = p.parse_args()
 
     if args.phase in ('preflop', 'all'):
-        train_preflop(n_iters=args.iters)
+        train_preflop(n_iters=args.iters, n_workers=args.workers)
     if args.phase in ('discard', 'all'):
         train_discard()
     if args.phase in ('postflop', 'all'):
