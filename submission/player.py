@@ -175,7 +175,8 @@ class PlayerAgent(Agent):
             dead   = hand5 + board3
             opp_probs = self._opp_range.get_probs_for_discard(
                 self._preflop_chart, canonicalize, dead, n_completions=10)
-            result = decide_discard_ev(obs, opp_probs=opp_probs)
+            result = decide_discard_ev(obs, opp_probs=opp_probs,
+                                        discard_net=self._discard_net)
             self._my_disc = [c for c in obs['my_cards'] if c >= 0
                              and c not in (obs['my_cards'][result[2]],
                                           obs['my_cards'][result[3]])]

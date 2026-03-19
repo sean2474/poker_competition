@@ -156,64 +156,13 @@ class OppRangeTracker:
 
     # ── Postflop ──────────────────────────────────────────────────────────────
 
-    def update_postflop_action(
-        self,
-        action_type: int,
-        strategy_net,
-        my_bet: int, opp_bet: int,
-        board: list, n_board: int, street: int,
-        opp_is_bb: bool,
-        my_disc: list, opp_disc: list,
-        aggressor_me: bool, aggressor_opp: bool,
-        n_bets_me: int, n_bets_opp: int,
-    ):
-        """
-        Bayesian update: P(pair) *= P(observed_action | opp_hand = pair).
-        Uses batch NN inference with vectorized numpy feature builder instead
-        of 91 separate state_to_features() calls.
-        """
-        if self._probs is None or strategy_net is None:
-            return
-        valid_idx = [i for i, p in enumerate(self._probs) if p > 1e-9]
-        if not valid_idx:
-            return
-
-        batch = self._build_batch_feats(
-            valid_idx, board, n_board, opp_is_bb,
-            my_bet, opp_bet, street,
-            my_disc, opp_disc,
-            aggressor_me, aggressor_opp, n_bets_me, n_bets_opp,
-        )
-
-        with torch.no_grad():
-            logits = strategy_net(
-                torch.from_numpy(batch).float()
-            ).numpy()                               # (n, 8)
-
-        # Softmax → action probability
-        logits -= logits.max(axis=1, keepdims=True)
-        probs_all = np.exp(logits)
-        probs_all /= probs_all.sum(axis=1, keepdims=True)
-
-        # Training-action slots for each game action
-        if   action_type == FOLD:   t_slots = [0]
-        elif action_type == CALL:   t_slots = [1]
-        elif action_type == CHECK:  t_slots = [2]
-        elif action_type == RAISE:  t_slots = [3, 4, 5, 6, 7]
-        else:
-            return
-
-        action_p = probs_all[:, t_slots].sum(axis=1)  # (n,)
-
-        # Bayesian update
-        weights = np.ones(len(_ALL_PAIRS), dtype=np.float32)
-        for k, i in enumerate(valid_idx):
-            weights[i] = max(float(action_p[k]), 1e-6)
-
-        new = self._probs * weights
-        s   = new.sum()
-        if s > 1e-9:
-            self._probs = new / s
+    def update_postflop_action(self, action_type, strategy_net,
+                               my_bet, opp_bet, board, n_board, street,
+                               opp_is_bb, my_disc, opp_disc,
+                               aggressor_me, aggressor_opp,
+                               n_bets_me, n_bets_opp):
+        """Placeholder — postflop range update not yet implemented."""
+        pass
 
     # ── Output ────────────────────────────────────────────────────────────────
 
