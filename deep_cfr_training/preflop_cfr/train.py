@@ -1,0 +1,135 @@
+"""
+preflop_cfr/train.py — External-sampling MCCFR for preflop with self-play terminals.
+
+Terminal values come from prob-agent self-play:
+  - Fold  → fold payoff (chips in pot)
+  - Call  → both players discard (prob agent) → showdown → actual winner
+"""
+
+import random
+import numpy as np
+
+from preflop_cfr.core  import Preflop
+from preflop_cfr.state import _State
+from preflop_cfr.utils import _SLOT, _match
+from game.game         import DECK_SIZE, canonicalize
+
+
+# ── Evaluator (lazy, shared) ──────────────────────────────────────────────────
+
+_ev_cache = {}
+
+def _get_eval():
+    if not _ev_cache:
+        from gym_env import PokerEnv, WrappedEval
+        _ev_cache['ev']  = WrappedEval()
+        _ev_cache['itc'] = PokerEnv.int_to_card
+    return _ev_cache['ev'], _ev_cache['itc']
+
+
+# ── Terminal value ────────────────────────────────────────────────────────────
+
+def _terminal(h0, h1, state, traverser, rng, heuristic, discard_sims):
+    """Simulate discard+showdown between two prob agents → value to traverser."""
+    if state.folded_by >= 0:
+        winner = 1 - state.folded_by
+        gain   = float(min(state.bets))
+        return gain if traverser == winner else -gain
+
+    # Deal 3-card board
+    dead      = set(h0) | set(h1)
+    remaining = [c for c in range(DECK_SIZE) if c not in dead]
+    board     = rng.sample(remaining, 3)
+
+    # Both players keep best 2 cards (prob agent)
+    ki0, kj0 = heuristic.best_discard(list(h0), board, num_sims=discard_sims)
+    ki1, kj1 = heuristic.best_discard(list(h1), board, num_sims=discard_sims)
+    kept0 = [h0[ki0], h0[kj0]]
+    kept1 = [h1[ki1], h1[kj1]]
+
+    # Showdown (no postflop betting — clean approximation for preflop training)
+    ev_obj, itc = _get_eval()
+    brd = [itc(c) for c in board]
+    s0  = ev_obj.evaluate([itc(c) for c in kept0], brd)
+    s1  = ev_obj.evaluate([itc(c) for c in kept1], brd)
+
+    bet = float(min(state.bets))
+    if   s0 < s1: winner = 0   # lower = better in treys
+    elif s1 < s0: winner = 1
+    else:         winner = -1  # tie
+
+    if winner == traverser:     return  bet
+    if winner == 1 - traverser: return -bet
+    return 0.
+
+
+# ── CFR step ──────────────────────────────────────────────────────────────────
+
+def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
+         heuristic, discard_sims):
+    """External-sampling MCCFR step with self-play terminal values."""
+    if state.done:
+        return _terminal(h0, h1, state, traverser, rng, heuristic, discard_sims)
+
+    cp    = state.acting
+    hand  = h0 if cp == 0 else h1
+    key   = (canonicalize(hand), state.hist)
+    valid = state.valid()
+    regs  = regrets.setdefault(key, np.zeros(3))
+    strat = _match(regs, valid)
+
+    ss = strat_sum.setdefault(key, np.zeros(3))
+    for a in valid:
+        ss[_SLOT[a]] += t * strat[a]
+
+    if cp == traverser:
+        vals = {a: _cfr(h0, h1, state.apply(a), traverser,
+                        regrets, strat_sum, t, rng, heuristic, discard_sims)
+                for a in valid}
+        ev = sum(strat[a] * vals[a] for a in valid)
+        for a in valid:
+            regs[_SLOT[a]] = max(0., regs[_SLOT[a]] + vals[a] - ev)
+        return ev
+    else:
+        a_s = rng.choices(valid, weights=[strat[a] for a in valid])[0]
+        return _cfr(h0, h1, state.apply(a_s), traverser,
+                    regrets, strat_sum, t, rng, heuristic, discard_sims)
+
+
+# ── Main training function ────────────────────────────────────────────────────
+
+def train(n_iters: int = 200_000, save_path: str = None,
+          discard_sims: int = 20, log_every: int = None) -> Preflop:
+    """
+    Run external-sampling MCCFR for preflop.
+
+    Args:
+        n_iters:      number of MCCFR iterations
+        save_path:    where to save the trained chart (.pkl)
+        discard_sims: MC sims per keep-pair in discard simulation
+        log_every:    print progress every N iters (default: n_iters // 10)
+    """
+    from heuristic.prob_agent import get_heuristic_agent
+
+    log_every = log_every or max(1, n_iters // 10)
+    heuristic = get_heuristic_agent()
+    rng = random.Random()
+    p   = Preflop()
+
+    for t in range(1, n_iters + 1):
+        deck = list(range(DECK_SIZE))
+        rng.shuffle(deck)
+        h0, h1 = tuple(deck[:5]), tuple(deck[5:10])
+
+        for tp in [0, 1]:
+            _cfr(h0, h1, _State(), tp,
+                 p._regrets, p._strat_sum, t, rng,
+                 heuristic, discard_sims)
+
+        if t % log_every == 0:
+            print(f'iter {t}/{n_iters}  infosets={len(p._strat_sum)}')
+
+    p._build_chart()
+    if save_path:
+        p.save(save_path)
+    return p
