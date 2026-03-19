@@ -1,18 +1,13 @@
 """
-Discard advantage network — NNUE additive architecture.
+DiscardNet — NNUE EV predictor for discard decisions.
 
-Input per keep-pair sample: feat(44) = pair(23) + ctx(21)
-  pair: my_cat[17] + hi_rank[1] + lo_rank[1] + blocker[4]
-  ctx:  board_ranks[3] + opp_cats[17] + is_bb[1]
-
-NNUE trick: pair and ctx are projected independently into a shared hidden
-space and ADDED before the output head. At inference the ctx embedding is
-computed once and reused for all 10 keep-pair samples (board+opp are fixed).
-
-Output: scalar advantage per sample.
-Strategy: regret_matching(advantages) over the 10 keep pairs.
-
-Single shared network for Player A and B — only opp_cats changes.
+Architecture: pair_layer(23→H) + ctx_layer(21→H) → ReLU → H/2 → scalar EV
+Strategy:
+  1. Forward pass → EV estimates per keep pair
+  2. candidate set = {k : EV(k) >= EV_max - EV_THRESHOLD}
+     (EV_THRESHOLD = max(1 chip, 1.25 × MC stderr) ≈ 0.025 in equity units)
+  3. softmax(EV * T) within candidates, zero outside
+  → Clear EV winners always chosen; near-ties get strategic mixing.
 """
 
 import numpy as np
@@ -20,6 +15,9 @@ import torch
 import torch.nn as nn
 
 from .features import FEAT_DIM, PAIR_DIM, CTX_DIM, N_KEEP_PAIRS
+
+EV_THRESHOLD = 0.025   # max(0.01 chip/100, 1.25 × stderr≈0.02) in [0,1] equity
+SOFTMAX_T    = 8.0     # temperature within candidate set
 
 
 class DiscardNet(nn.Module):
@@ -35,25 +33,35 @@ class DiscardNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, FEAT_DIM=44) → (B,) scalar advantages.
-        Internally split: x[:,:PAIR_DIM=23] → pair_layer, x[:,PAIR_DIM:] → ctx_layer."""
-        pair_h = self.pair_layer(x[:, :PAIR_DIM])   # (B, H)
-        ctx_h  = self.ctx_layer(x[:, PAIR_DIM:])    # (B, H)
-        return self.output(pair_h + ctx_h).squeeze(-1)   # (B,)
+        """x: (B, 44) → (B,) scalar EV estimates."""
+        return self.output(
+            self.pair_layer(x[:, :PAIR_DIM]) + self.ctx_layer(x[:, PAIR_DIM:])
+        ).squeeze(-1)
 
-    def get_strategy(self, all_pair_feats: np.ndarray) -> np.ndarray:
+    def get_strategy(self, all_pair_feats: np.ndarray,
+                     threshold: float = EV_THRESHOLD) -> np.ndarray:
         """
-        all_pair_feats: (10, FEAT_DIM=44) — from build_all_feats()
-        Returns: strategy[10] via regret matching on predicted advantages.
+        all_pair_feats: (10, 44) from build_all_feats()
+        Returns strategy[10]:
+          - candidates (EV within threshold of best) get softmax weight
+          - non-candidates get 0
         """
         device = next(self.parameters()).device
         with torch.no_grad():
-            adv = self.forward(
+            ev = self.forward(
                 torch.from_numpy(all_pair_feats).float().to(device)
             ).cpu().numpy()   # (10,)
-        pos   = np.maximum(adv, 0.0)
-        total = pos.sum()
-        return pos / total if total > 0 else np.ones(N_KEEP_PAIRS) / N_KEEP_PAIRS
+
+        best  = ev.max()
+        mask  = ev >= best - threshold          # candidate set
+        ev_c  = ev - best                       # shift for numerical stability
+        exp_v = np.exp(np.clip(ev_c * SOFTMAX_T, -20., 0.))
+        exp_v[~mask] = 0.
+        total = exp_v.sum()
+        if total > 1e-9:
+            return exp_v / total
+        # fallback: uniform over candidates
+        return mask.astype(np.float32) / mask.sum()
 
 
 def make_net(hidden_dim: int = 128) -> DiscardNet:

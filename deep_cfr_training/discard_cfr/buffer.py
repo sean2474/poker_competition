@@ -1,8 +1,6 @@
 """
-Reservoir buffer for discard CFR training samples.
-
-Each sample: (feat[39], scalar_advantage, iteration).
-One game generates 20 independent samples (10 pairs × 2 players).
+Reservoir buffer for discard CFR samples.
+Stores (features: N×44, ev_targets: N, iterations: N).
 """
 
 import random
@@ -12,36 +10,47 @@ from .features import FEAT_DIM
 
 
 class DiscardBuffer:
-    def __init__(self, max_size: int = 500_000):
-        self.max_size = max_size
-        self.feats = np.zeros((max_size, FEAT_DIM), dtype=np.float32)
-        self.advs  = np.zeros(max_size,             dtype=np.float32)
-        self.iters = np.zeros(max_size,             dtype=np.float32)
-        self.size  = 0
-        self.total = 0
+    def __init__(self, capacity: int = 500_000):
+        self.capacity  = capacity
+        self._feats    = None   # (capacity, 44)
+        self._targets  = None   # (capacity,)
+        self._iters    = None   # (capacity,)
+        self._size     = 0
+        self._total    = 0      # total samples seen (for reservoir)
 
-    def add_batch(self, feats: np.ndarray, advs: np.ndarray, iteration: float):
-        """feats: (N, 39)  advs: (N,)  — reservoir sampling."""
+    def _init(self):
+        if self._feats is None:
+            self._feats   = np.empty((self.capacity, FEAT_DIM), dtype=np.float32)
+            self._targets = np.empty(self.capacity,             dtype=np.float32)
+            self._iters   = np.empty(self.capacity,             dtype=np.float32)
+
+    def add_batch(self, feats: np.ndarray, targets: np.ndarray, iteration: float):
+        """Add N samples. feats: (N, 44), targets: (N,)."""
+        self._init()
         n = len(feats)
-        for i in range(n):
-            self.total += 1
-            if self.size < self.max_size:
-                idx = self.size
-                self.size += 1
+        for k in range(n):
+            self._total += 1
+            if self._size < self.capacity:
+                idx = self._size
+                self._size += 1
             else:
-                idx = random.randint(0, self.total - 1)
-                if idx >= self.max_size:
+                idx = random.randint(0, self._total - 1)
+                if idx >= self.capacity:
                     continue
-            self.feats[idx] = feats[i]
-            self.advs[idx]  = advs[i]
-            self.iters[idx] = float(iteration)
+            self._feats[idx]   = feats[k]
+            self._targets[idx] = targets[k]
+            self._iters[idx]   = iteration
 
     def sample(self, batch_size: int):
-        """Returns (feats(B,39), advs(B,), iters(B,)) or None."""
-        if self.size == 0:
+        """Returns (feats, targets, iters) or None if buffer too small."""
+        if self._size < batch_size:
             return None
-        idx = np.random.choice(self.size, min(batch_size, self.size), replace=False)
-        return self.feats[idx], self.advs[idx], self.iters[idx]
+        idx = np.random.choice(self._size, batch_size, replace=False)
+        return (
+            self._feats[:self._size][idx],
+            self._targets[:self._size][idx],
+            self._iters[:self._size][idx],
+        )
 
-    def __len__(self) -> int:
-        return self.size
+    def __len__(self):
+        return self._size
