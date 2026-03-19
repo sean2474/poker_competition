@@ -15,14 +15,26 @@ def _payoff(state: _State, traverser: int) -> float:
 
 
 def _match(regrets: np.ndarray, valid: List[str]) -> dict:
-    slot_acts: dict = {}
-    for a in valid:
-        slot_acts.setdefault(_SLOT[a], []).append(a)
-    pos   = [max(float(regrets[s]), 0.) for s in range(3)]
-    total = sum(pos[s] for s in slot_acts)
-    p     = ({s: pos[s] / total for s in slot_acts} if total > 0
-             else {s: 1. / len(slot_acts) for s in slot_acts})
-    return {a: p[_SLOT[a]] / len(slot_acts[_SLOT[a]]) for a in valid}
+    n = len(valid)
+    if n == 3:
+        r0 = regrets[0]; r0 = r0 if r0 > 0. else 0.
+        r1 = regrets[1]; r1 = r1 if r1 > 0. else 0.
+        r2 = regrets[2]; r2 = r2 if r2 > 0. else 0.
+        tot = r0 + r1 + r2
+        if tot > 0.:
+            return {'f': r0/tot, 'c': r1/tot, 'r': r2/tot}
+        return {'f': 1./3., 'c': 1./3., 'r': 1./3.}
+    a0 = valid[0]
+    if n == 1:
+        return {a0: 1.0}
+    a1 = valid[1]
+    s0, s1 = _SLOT[a0], _SLOT[a1]
+    r0 = regrets[s0]; r0 = r0 if r0 > 0. else 0.
+    r1 = regrets[s1]; r1 = r1 if r1 > 0. else 0.
+    tot = r0 + r1
+    if tot > 0.:
+        return {a0: r0/tot, a1: r1/tot}
+    return {a0: 0.5, a1: 0.5}
 
 
 def _cfr(h0, h1, state: _State, tp: int,

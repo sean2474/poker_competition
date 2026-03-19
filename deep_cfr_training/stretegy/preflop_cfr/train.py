@@ -10,6 +10,7 @@ import ctypes
 import random
 import time
 import numpy as np
+from functools import lru_cache
 from tqdm import tqdm
 
 from .core   import Preflop
@@ -17,16 +18,22 @@ from .state  import _State
 from .utils  import _SLOT, _match
 from game.game import DECK_SIZE, canonicalize
 
+_DECK         = list(range(DECK_SIZE))          # reused every iteration
+_canonicalize = lru_cache(maxsize=None)(canonicalize)  # ~80k unique hands
 
-# ── Shared progress counter (set by worker initializer) ─────────────────────
+
+# ── Shared state (set by worker initializer) ────────────────────────────────
 
 _g_progress = None
 _g_lock      = None
+_g_ev_obj   = None   # WrappedEval instance cached per-worker
+_g_itc      = None   # int_to_card function cached per-worker
 
-def _init_worker_progress(shared_val, lock):
-    global _g_progress, _g_lock
+def _init_worker(shared_val, lock):
+    global _g_progress, _g_lock, _g_ev_obj, _g_itc
     _g_progress = shared_val
     _g_lock     = lock
+    _g_ev_obj, _g_itc = _get_eval()
 
 
 # ── Evaluator (lazy, shared) ──────────────────────────────────────────────────
@@ -52,7 +59,7 @@ def _terminal(h0, h1, state, traverser, rng, heuristic, discard_sims):
 
     # Deal 3-card flop
     dead      = set(h0) | set(h1)
-    remaining = [c for c in range(DECK_SIZE) if c not in dead]
+    remaining = [c for c in _DECK if c not in dead]
     flop      = rng.sample(remaining, 3)
 
     # Both players keep best 2 cards (prob agent) based on flop
@@ -63,12 +70,15 @@ def _terminal(h0, h1, state, traverser, rng, heuristic, discard_sims):
 
     # Deal turn + river from remaining deck (exclude all known cards)
     dead_full  = dead | set(flop)
-    remaining2 = [c for c in range(DECK_SIZE) if c not in dead_full]
+    remaining2 = [c for c in _DECK if c not in dead_full]
     turn, river = rng.sample(remaining2, 2)
     board = flop + [turn, river]
 
     # Showdown with full 5-card board (no postflop betting)
-    ev_obj, itc = _get_eval()
+    ev_obj = _g_ev_obj
+    itc    = _g_itc
+    if ev_obj is None:
+        ev_obj, itc = _get_eval()
     brd = [itc(c) for c in board]
     s0  = ev_obj.evaluate([itc(c) for c in kept0], brd)
     s1  = ev_obj.evaluate([itc(c) for c in kept1], brd)
@@ -97,12 +107,19 @@ def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
 
     cp    = state.acting
     hand  = h0 if cp == 0 else h1
-    key   = (canonicalize(hand), state.hist)
+    key   = (_canonicalize(hand), state.hist)
     valid = state.valid()
-    regs  = regrets.setdefault(key, np.zeros(3))
+
+    regs = regrets.get(key)
+    if regs is None:
+        regs = np.zeros(3)
+        regrets[key] = regs
     strat = _match(regs, valid)
 
-    ss = strat_sum.setdefault(key, np.zeros(3))
+    ss = strat_sum.get(key)
+    if ss is None:
+        ss = np.zeros(3)
+        strat_sum[key] = ss
     for a in valid:
         ss[_SLOT[a]] += t * strat[a]
 
@@ -116,8 +133,13 @@ def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
             regs[_SLOT[a]] = max(0., regs[_SLOT[a]] + vals[a] - ev)
         return ev
     else:
-        a_s = rng.choices(valid, weights=[strat[a] for a in valid])[0]
-        return _cfr(h0, h1, state.apply(a_s), traverser,
+        r = rng.random()
+        cum = 0.
+        for a in valid:
+            cum += strat[a]
+            if r < cum:
+                break
+        return _cfr(h0, h1, state.apply(a), traverser,
                     regrets, strat_sum, t, rng, heuristic, discard_sims,
                     terminal_fn)
 
@@ -150,7 +172,7 @@ def _worker_fn(args):
     _local = 0
 
     for t in range(1, n_iters + 1):
-        deck = list(range(DECK_SIZE))
+        deck = _DECK[:]
         rng.shuffle(deck)
         h0, h1 = tuple(deck[:5]), tuple(deck[5:10])
         for tp in [0, 1]:
@@ -201,6 +223,9 @@ def train(n_iters: int = 200_000, save_path: str = None,
     if n_workers > 1:
         return _train_parallel(n_iters, save_path, discard_sims, n_workers)
 
+    global _g_ev_obj, _g_itc
+    _g_ev_obj, _g_itc = _get_eval()
+
     from heuristic.prob_agent import get_heuristic_agent
 
     heuristic = get_heuristic_agent()
@@ -211,7 +236,7 @@ def train(n_iters: int = 200_000, save_path: str = None,
 
     with tqdm(range(1, n_iters + 1), desc='preflop MCCFR', ncols=80) as bar:
         for t in bar:
-            deck = list(range(DECK_SIZE))
+            deck = _DECK[:]
             rng.shuffle(deck)
             h0, h1 = tuple(deck[:5]), tuple(deck[5:10])
 
@@ -250,7 +275,7 @@ def _train_parallel(n_iters: int, save_path: str, discard_sims: int,
     prog_lock = Lock()
 
     with Pool(processes=n_workers,
-              initializer=_init_worker_progress,
+              initializer=_init_worker,
               initargs=(progress, prog_lock)) as pool:
         async_results = [pool.apply_async(_worker_fn, (w,)) for w in work]
 
