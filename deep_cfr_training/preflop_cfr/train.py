@@ -102,7 +102,12 @@ def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
 def _worker_fn(args):
     """Run N iters of MCCFR independently. Returns strat_sum dict."""
     import os, sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    _this   = os.path.abspath(__file__)
+    _cfr_dir  = os.path.dirname(os.path.dirname(_this))          # deep_cfr_training/
+    _proj_dir = os.path.dirname(_cfr_dir)                        # project root (gym_env.py)
+    for p in (_cfr_dir, _proj_dir):
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
     worker_id, n_iters, discard_sims = args
 
