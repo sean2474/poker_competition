@@ -80,20 +80,23 @@ class _EnvPlayer:
         return env_a
 
     def observe_opp(self, obs: dict, opp_action_tuple: tuple):
-        """Update range with opponent's observed action."""
+        """Update range + history with opponent's observed action."""
         street = obs['street']
         at     = opp_action_tuple[0]
         board  = [c for c in obs['community_cards'] if c >= 0]
         opp_d  = [c for c in obs['opp_discarded_cards'] if c >= 0]
+        ch     = _env_to_char(at)
 
         if at == DISCARD:
             if opp_d:
                 self.agent.observe_opp_discard(opp_d, board)
         elif street == 0:
-            self.agent.observe_opp_preflop(_env_to_char(at), self._pf_hist)
+            # Pass history BEFORE opponent's action, then append
+            self.agent.observe_opp_preflop(ch, self._pf_hist)
+            self._pf_hist += ch
         else:
-            self.agent.observe_opp_postflop(_env_to_char(at),
-                                            self._post_hist, board)
+            self.agent.observe_opp_postflop(ch, self._post_hist, board)
+            self._post_hist += ch
 
 
 # ── Worker (module-level for multiprocessing) ─────────────────────────────────

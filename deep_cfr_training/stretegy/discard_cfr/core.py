@@ -32,14 +32,16 @@ class Discard(DiscardModel):
         torch.save(self._net.state_dict(), path)
         print(f'DiscardNet saved to {path}')
 
-    def train(self, preflop_model=None, n_episodes: int = 5_000,
+    def train(self, X: np.ndarray, Y: np.ndarray,
               n_epochs: int = 20, batch_size: int = 256,
               lr: float = 1e-3, save_path: str = None, **kwargs):
-        from .train import train as _train_fn
-        self._net = _train_fn(
-            discard_model=self._net,
-            preflop_model=preflop_model,
-            n_episodes=n_episodes,
+        """Train DiscardNet on pre-computed (X, Y) from Agent.train()."""
+        from .train import train_net
+        if self._net is None:
+            from .model import DiscardNet
+            self._net = DiscardNet()
+        self._net = train_net(
+            self._net, X, Y,
             n_epochs=n_epochs,
             batch_size=batch_size,
             lr=lr,

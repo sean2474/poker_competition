@@ -83,24 +83,27 @@ class Agent(AgentBase):
     # ── Training (range-connected) ────────────────────────────────────────────
 
     def train(self, phase: str = 'all',
-              preflop_kwargs: dict = None,
-              discard_kwargs: dict = None,
+              preflop_kwargs:  dict = None,
+              discard_kwargs:  dict = None,
               postflop_kwargs: dict = None):
         """
-        Train models in sequence, automatically wiring range dependencies:
-          preflop  → standalone
-          discard  → receives self.preflop as preflop_model
-          postflop → receives self.preflop + self.discard
+        Delegate to training_phase modules:
+          'preflop'  → standalone CFR
+          'discard'  → joint preflop + discard alternating rounds
+          'postflop' → joint preflop + discard + postflop (TBD)
         """
-        if phase in ('preflop', 'all'):
-            self.preflop.train(**(preflop_kwargs or {}))
+        if phase == 'preflop' or phase == 'discard' or phase == 'postflop':
+            from training_phase.preflop import train as _train
+            _train(self.preflop, **(preflop_kwargs or {}))
 
-        if phase in ('discard', 'all'):
-            kw = {'preflop_model': self.preflop}
-            kw.update(discard_kwargs or {})
-            self.discard.train(**kw)
+        elif phase == 'discard' or phase == 'postflop':
+            from training_phase.discard import train as _train
+            kw = discard_kwargs or {}
+            kw.setdefault('preflop_save', None)
+            kw.setdefault('discard_save', None)
+            _train(self.preflop, self.discard, **kw)
 
-        if phase in ('postflop', 'all') and self.postflop is not None:
-            kw = {'preflop_model': self.preflop, 'discard_model': self.discard}
-            kw.update(postflop_kwargs or {})
-            self.postflop.train(**kw)
+        elif phase == 'postflop' and self.postflop is not None:
+            from training_phase.postflop import train as _train
+            _train(self.preflop, self.discard, self.postflop,
+                   **(postflop_kwargs or {}))
