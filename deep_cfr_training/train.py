@@ -19,9 +19,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 MODELS_DIR = os.path.join(os.path.dirname(__file__), 'models')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-PREFLOP_PATH = os.path.join(MODELS_DIR, 'preflop.pkl')
-PREFLOP_CKPT = os.path.join(MODELS_DIR, 'preflop.ckpt')
-DISCARD_PATH = os.path.join(MODELS_DIR, 'discard.pt')
+PREFLOP_PATH    = os.path.join(MODELS_DIR, 'preflop.pkl')
+PREFLOP_CKPT    = os.path.join(MODELS_DIR, 'preflop.ckpt')
+DISCARD_PATH    = os.path.join(MODELS_DIR, 'discard.pt')
+DISCARD_ADV_PATH = os.path.join(MODELS_DIR, 'discard_adv.pt')
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
@@ -46,6 +47,8 @@ if __name__ == '__main__':
         preflop.load(PREFLOP_PATH)             # inference-only chart
     if os.path.exists(DISCARD_PATH):
         discard.load(DISCARD_PATH)
+    if os.path.exists(DISCARD_ADV_PATH):
+        discard.load_adv(DISCARD_ADV_PATH)
 
     agent = Agent(preflop, discard)
 
@@ -65,5 +68,6 @@ if __name__ == '__main__':
             'n_workers':       args.workers,
             'preflop_save':    PREFLOP_PATH,
             'discard_save':    DISCARD_PATH,
+            'adv_save':        DISCARD_ADV_PATH,
         },
     )

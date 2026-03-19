@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 
-# hand_category(17) + blocker_flags(4) + board_texture(4) + opp_range(13) = 38
-FEAT_DIM = 38
+# blocker_flags(4) + board_texture(6) + range_features(opp)(17) + range_features(hero)(17) = 44
+FEAT_DIM = 44
 
 
-class DiscardNet(nn.Module):
+class _BaseNet(nn.Module):
     def __init__(self, feat_dim: int = FEAT_DIM, hidden: int = 128, n_layers: int = 3):
         super().__init__()
         layers = []
@@ -18,3 +18,21 @@ class DiscardNet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)
+
+
+class AdvantageNet(_BaseNet):
+    """Predicts instantaneous advantage (regret) for a keep combo.
+    Used during CFR traversal to compute the current strategy via regret matching.
+    """
+    pass
+
+
+class StrategyNet(_BaseNet):
+    """Predicts average strategy weight for a keep combo.
+    Trained on accumulated (features, strategy_prob) pairs.
+    Used for inference (actual play).
+    """
+    pass
+
+
+DiscardNet = AdvantageNet  # backward compat

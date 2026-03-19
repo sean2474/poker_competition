@@ -125,54 +125,84 @@ def blocker_flags(c0: int, c1: int, board: list) -> np.ndarray:
 
 def board_texture_features(c0: int, c1: int, board: list) -> np.ndarray:
     """
-    4-dim: [board_highest, board_lowest, my_highest, my_lowest] (normalized /8)
+    6-dim: [board_highest, board_lowest, board_flush_possible, board_connected,
+            my_highest, my_lowest]
+      board_flush_possible: dominant suit count on board / 3  (wet flush indicator)
+      board_connected:      length of longest rank run on board / 2
+    Rank values normalized /8.
     """
     if not board:
-        return np.zeros(4, dtype=np.float32)
-    brd_rs = sorted(_rank(c) for c in board)
-    my_rs  = sorted([_rank(c0), _rank(c1)])
-    return np.array([brd_rs[-1], brd_rs[0], my_rs[-1], my_rs[0]],
-                    dtype=np.float32) / 8.
+        return np.zeros(6, dtype=np.float32)
+    brd_rs  = sorted(_rank(c) for c in board)
+    my_rs   = sorted([_rank(c0), _rank(c1)])
+
+    flush_possible = max(Counter(_suit(c) for c in board).values()) / 3.
+
+    uniq_brd = sorted(set(brd_rs))
+    max_run = 1
+    cur_run = 1
+    for i in range(1, len(uniq_brd)):
+        if uniq_brd[i] - uniq_brd[i - 1] == 1:
+            cur_run += 1
+            max_run = max(max_run, cur_run)
+        else:
+            cur_run = 1
+    connected = max_run / 2.
+
+    return np.array(
+        [brd_rs[-1] / 8., brd_rs[0] / 8., flush_possible, connected,
+         my_rs[-1] / 8., my_rs[0] / 8.],
+        dtype=np.float32
+    )
 
 
-# ── Opponent range aggregation ────────────────────────────────────────────────
+# ── Range → expected hand-category features ──────────────────────────────────
 
-def opp_range_features(opp_range: np.ndarray) -> np.ndarray:
-    """13-dim: rank_marginal(9) + suit_marginal(3) + pair_prob(1)."""
-    w = np.asarray(opp_range, dtype=np.float32)
+def range_features(range_vec: np.ndarray, board: list) -> np.ndarray:
+    """
+    17-dim probability-weighted hand-category distribution over a range.
+
+    For each combo k in _ALL_PAIR:
+      feat[hand_category(k, board)] += range_vec[k]
+
+    Normalised so values sum to 1 (= expected category distribution).
+    """
+    feat = np.zeros(17, dtype=np.float32)
+    w = np.asarray(range_vec, dtype=np.float32)
     s = w.sum()
-    w = w / s if s > 1e-9 else np.full(len(_ALL_PAIR), 1. / len(_ALL_PAIR), dtype=np.float32)
-
-    rank_m = np.zeros(NUM_RANKS, dtype=np.float32)
-    suit_m = np.zeros(NUM_SUITS, dtype=np.float32)
-    pair_p = 0.
-    for idx, (ca, cb) in enumerate(_ALL_PAIR):
-        wi = float(w[idx])
-        if wi < 1e-9: continue
-        rank_m[_rank(ca)] += wi;  rank_m[_rank(cb)] += wi
-        suit_m[_suit(ca)] += wi;  suit_m[_suit(cb)] += wi
-        if _rank(ca) == _rank(cb): pair_p += wi
-    rs = rank_m.sum(); rank_m = rank_m / rs if rs > 0 else rank_m
-    ss = suit_m.sum(); suit_m = suit_m / ss if ss > 0 else suit_m
-    return np.concatenate([rank_m, suit_m, [pair_p]])  # 9+3+1 = 13
+    if s < 1e-9:
+        feat[16] = 1.  # fallback: all weight on high_card
+        return feat
+    w = w / s
+    for idx, (rc0, rc1) in enumerate(_ALL_PAIR):
+        prob = float(w[idx])
+        if prob < 1e-9:
+            continue
+        feat[hand_category(rc0, rc1, board)] += prob
+    return feat
 
 
 # ── Combined feature builder ──────────────────────────────────────────────────
 
 def build_features(c0: int, c1: int, board: list,
-                   opp_range: np.ndarray) -> np.ndarray:
+                   opp_range: np.ndarray,
+                   hero_range: np.ndarray) -> np.ndarray:
     """
-    38-dim feature vector:
-      hand_category one-hot (17) + blocker_flags (4)
-      + board_texture (4) + opp_range_features (13) = 38
+    44-dim feature vector (strategic context only, no raw hand-category):
+      blocker_flags (4)
+      + board_texture (6)
+      + range_features(opp_range)  (17)  — expected opp hand-category dist
+      + range_features(hero_range) (17)  — expected hero hand-category dist
+      = 44
+
+    Hand strength is captured separately via EV computation.
+    At inference: score[a] = EV[a] + net(features_a) -> softmax -> strategy.
     """
-    cat = hand_category(c0, c1, board)
-    cat_oh = np.zeros(17, dtype=np.float32); cat_oh[cat] = 1.
     return np.concatenate([
-        cat_oh,
         blocker_flags(c0, c1, board),
         board_texture_features(c0, c1, board),
-        opp_range_features(opp_range),
+        range_features(opp_range, board),
+        range_features(hero_range, board),
     ])
 
 

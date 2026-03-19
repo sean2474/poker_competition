@@ -35,7 +35,7 @@ def _make_terminal_fn(discard_model, preflop_model):
 
         dead      = set(h0) | set(h1)
         remaining = [c for c in range(DECK_SIZE) if c not in dead]
-        board     = rng.sample(remaining, 3)
+        flop      = rng.sample(remaining, 3)
 
         if discard_model._net is not None:
             from range_finder.core import Range
@@ -43,17 +43,22 @@ def _make_terminal_fn(discard_model, preflop_model):
             range_obj.update([], [], [], 'preflop', preflop_model,
                              history=state.hist)
             (ki0, kj0), _ = discard_model.action(
-                board, list(h0), '', range_obj.hero_range, range_obj.opp_range)
+                flop, list(h0), '', range_obj.hero_range, range_obj.opp_range)
             (ki1, kj1), _ = discard_model.action(
-                board, list(h1), '', range_obj.opp_range, range_obj.hero_range)
+                flop, list(h1), '', range_obj.opp_range, range_obj.hero_range)
         else:
             from heuristic.prob_agent import get_heuristic_agent
             heur = get_heuristic_agent()
-            ki0, kj0 = heur.best_discard(list(h0), board)
-            ki1, kj1 = heur.best_discard(list(h1), board)
+            ki0, kj0 = heur.best_discard(list(h0), flop)
+            ki1, kj1 = heur.best_discard(list(h1), flop)
 
         kept0 = [h0[ki0], h0[kj0]]
         kept1 = [h1[ki1], h1[kj1]]
+
+        dead_full  = dead | set(flop)
+        remaining2 = [c for c in range(DECK_SIZE) if c not in dead_full]
+        turn, river = rng.sample(remaining2, 2)
+        board = flop + [turn, river]
 
         ev_obj, itc = _get_eval()
         brd = [itc(c) for c in board]
@@ -106,16 +111,19 @@ def train(preflop_model: Preflop, discard_model: Discard,
             terminal_fn=terminal_fn,
         )
 
-        # Step 3: generate discard episodes with updated preflop range
+        # Step 3: generate Deep CFR episodes (advantage net guides current strategy)
         tqdm.write(f'[discard] generating {n_episodes} episodes ...')
-        X, Y = generate_episodes(preflop_model, n_episodes)
+        adv_X, adv_Y, str_X, str_Y = generate_episodes(
+            preflop_model, discard_model._adv_net, n_episodes)
 
-        # Step 4: train DiscardNet
+        # Step 4: train AdvantageNet + StrategyNet
         tqdm.write(f'[discard] training {n_epochs} epochs ...')
+        adv_save_r = discard_save.replace('.pt', '_adv.pt') if discard_save else None
         discard_model.train(
-            X, Y,
+            adv_X, adv_Y, str_X, str_Y,
             n_epochs=n_epochs,
             batch_size=batch_size,
             lr=lr,
-            save_path=discard_save,
+            adv_save=adv_save_r,
+            str_save=discard_save,
         )

@@ -6,7 +6,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from .model import DiscardNet, FEAT_DIM
+from .model import AdvantageNet, StrategyNet, FEAT_DIM
 from .utils import (
     build_features, calculate_ev,
     _ALL_PAIR, DECK_SIZE,
@@ -19,33 +19,61 @@ _KEEP_COMBOS = list(itertools.combinations(range(5), 2))
 
 class Discard(DiscardModel):
     def __init__(self):
-        self._net: DiscardNet = None
+        self._adv_net: AdvantageNet = None
+        self._str_net: StrategyNet  = None
+
+    @property
+    def _net(self):
+        """Backward compat: expose _adv_net as _net."""
+        return self._adv_net
 
     def load(self, path: str):
-        self._net = DiscardNet()
-        self._net.load_state_dict(torch.load(path, map_location='cpu'))
-        self._net.eval()
-        print(f'DiscardNet loaded from {path}')
+        """Load StrategyNet weights (inference model)."""
+        self._str_net = StrategyNet()
+        self._str_net.load_state_dict(torch.load(path, map_location='cpu'))
+        self._str_net.eval()
+        print(f'StrategyNet loaded from {path}')
 
     def save(self, path: str):
+        """Save StrategyNet weights."""
+        if self._str_net is None:
+            raise RuntimeError('StrategyNet not trained yet')
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        torch.save(self._net.state_dict(), path)
-        print(f'DiscardNet saved to {path}')
+        torch.save(self._str_net.state_dict(), path)
+        print(f'StrategyNet saved to {path}')
 
-    def train(self, X: np.ndarray, Y: np.ndarray,
+    def save_adv(self, path: str):
+        """Save AdvantageNet weights for training resumption."""
+        if self._adv_net is None:
+            raise RuntimeError('AdvantageNet not trained yet')
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        torch.save(self._adv_net.state_dict(), path)
+
+    def load_adv(self, path: str):
+        """Load AdvantageNet weights for training resumption."""
+        self._adv_net = AdvantageNet()
+        self._adv_net.load_state_dict(torch.load(path, map_location='cpu'))
+        self._adv_net.eval()
+
+    def train(self, adv_X: np.ndarray, adv_Y: np.ndarray,
+              str_X: np.ndarray, str_Y: np.ndarray,
               n_epochs: int = 20, batch_size: int = 256,
-              lr: float = 1e-3, save_path: str = None, **kwargs):
-        """Train DiscardNet on pre-computed (X, Y) from Agent.train()."""
+              lr: float = 1e-3,
+              adv_save: str = None, str_save: str = None, **kwargs):
+        """Train AdvantageNet + StrategyNet on Deep CFR data."""
         from .train import train_net
-        if self._net is None:
-            from .model import DiscardNet
-            self._net = DiscardNet()
-        self._net = train_net(
-            self._net, X, Y,
+        if self._adv_net is None:
+            self._adv_net = AdvantageNet()
+        if self._str_net is None:
+            self._str_net = StrategyNet()
+        train_net(
+            self._adv_net, self._str_net,
+            adv_X, adv_Y, str_X, str_Y,
             n_epochs=n_epochs,
             batch_size=batch_size,
             lr=lr,
-            save_path=save_path,
+            adv_save=adv_save,
+            str_save=str_save,
         )
 
     def action(self, board: list, hand: list, history: str,
@@ -72,22 +100,26 @@ class Discard(DiscardModel):
         if s > 1e-9:
             opp_w /= s
 
-        # 각 discard의 ev계산
-        if self._net is not None:
-            evs = self._net_evs(hand, board, opp_w)
+        hero_w = np.asarray(hero_range, dtype=np.float32).copy()
+        hs = hero_w.sum()
+        if hs > 1e-9:
+            hero_w /= hs
+
+        # EV for all 10 keep combos (hand strength baseline)
+        ev = self._mc_evs(hand, board, opp_w, dead)
+
+        # Network logit adjustment (strategic deviation from EV)
+        if self._str_net is not None:
+            adj = self._net_output(self._str_net, hand, board, opp_w, hero_w)
+        elif self._adv_net is not None:
+            adj = self._net_output(self._adv_net, hand, board, opp_w, hero_w)
         else:
-            evs = self._mc_evs(hand, board, opp_w, dead)
+            adj = np.zeros(len(_KEEP_COMBOS), dtype=np.float32)
 
-        # range를 feature화, 내 실제 핸드들의 현재 strength 추출
-        # → build_features: hand_category(17) + blockers(4) + board_texture(4) + opp(13)
-
-        # 추출한 features, board texture 등등, 모델에 전달
-        # → _net_evs: batch forward pass through DiscardNet
-
-        # 모델에서 받은 각각의 출력을 바탕으로 확률 계산해서 리턴
-        ev_t = np.array(evs, dtype=np.float64) / temperature
-        ev_t -= ev_t.max()
-        probs = np.exp(ev_t).astype(np.float32)
+        # score = EV + adjustment → softmax → strategy
+        score = (ev + adj).astype(np.float64) / temperature
+        score -= score.max()
+        probs = np.exp(score).astype(np.float32)
         probs /= probs.sum()
 
         combo_idx = random.choices(range(len(_KEEP_COMBOS)), weights=probs)[0]
@@ -95,16 +127,17 @@ class Discard(DiscardModel):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _net_evs(self, hand: list, board: list,
-                 opp_range: np.ndarray) -> np.ndarray:
-        """Batch forward pass for all 10 keep combos."""
+    def _net_output(self, net, hand: list, board: list,
+                    opp_range: np.ndarray,
+                    hero_range: np.ndarray) -> np.ndarray:
+        """Batch forward pass for all 10 keep combos. Returns logit adjustments."""
         feats = np.stack([
-            build_features(hand[i], hand[j], board, opp_range)
+            build_features(hand[i], hand[j], board, opp_range, hero_range)
             for i, j in _KEEP_COMBOS
         ])                                          # (10, FEAT_DIM)
         with torch.no_grad():
-            evs = self._net(torch.tensor(feats, dtype=torch.float32)).numpy()
-        return evs                                  # (10,)
+            out = net(torch.tensor(feats, dtype=torch.float32)).numpy()
+        return out                                  # (10,)
 
     def _mc_evs(self, hand: list, board: list, opp_range: np.ndarray,
                 dead: set, n_samples: int = 50) -> np.ndarray:

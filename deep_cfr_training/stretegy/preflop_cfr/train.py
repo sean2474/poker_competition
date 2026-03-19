@@ -6,7 +6,9 @@ Terminal values come from prob-agent self-play:
   - Call  → both players discard (prob agent) → showdown → actual winner
 """
 
+import ctypes
 import random
+import time
 import numpy as np
 from tqdm import tqdm
 
@@ -14,6 +16,17 @@ from .core   import Preflop
 from .state  import _State
 from .utils  import _SLOT, _match
 from game.game import DECK_SIZE, canonicalize
+
+
+# ── Shared progress counter (set by worker initializer) ─────────────────────
+
+_g_progress = None
+_g_lock      = None
+
+def _init_worker_progress(shared_val, lock):
+    global _g_progress, _g_lock
+    _g_progress = shared_val
+    _g_lock     = lock
 
 
 # ── Evaluator (lazy, shared) ──────────────────────────────────────────────────
@@ -37,18 +50,24 @@ def _terminal(h0, h1, state, traverser, rng, heuristic, discard_sims):
         gain   = float(min(state.bets))
         return gain if traverser == winner else -gain
 
-    # Deal 3-card board
+    # Deal 3-card flop
     dead      = set(h0) | set(h1)
     remaining = [c for c in range(DECK_SIZE) if c not in dead]
-    board     = rng.sample(remaining, 3)
+    flop      = rng.sample(remaining, 3)
 
-    # Both players keep best 2 cards (prob agent)
-    ki0, kj0 = heuristic.best_discard(list(h0), board, num_sims=discard_sims)
-    ki1, kj1 = heuristic.best_discard(list(h1), board, num_sims=discard_sims)
+    # Both players keep best 2 cards (prob agent) based on flop
+    ki0, kj0 = heuristic.best_discard(list(h0), flop, num_sims=discard_sims)
+    ki1, kj1 = heuristic.best_discard(list(h1), flop, num_sims=discard_sims)
     kept0 = [h0[ki0], h0[kj0]]
     kept1 = [h1[ki1], h1[kj1]]
 
-    # Showdown (no postflop betting — clean approximation for preflop training)
+    # Deal turn + river from remaining deck (exclude all known cards)
+    dead_full  = dead | set(flop)
+    remaining2 = [c for c in range(DECK_SIZE) if c not in dead_full]
+    turn, river = rng.sample(remaining2, 2)
+    board = flop + [turn, river]
+
+    # Showdown with full 5-card board (no postflop betting)
     ev_obj, itc = _get_eval()
     brd = [itc(c) for c in board]
     s0  = ev_obj.evaluate([itc(c) for c in kept0], brd)
@@ -127,6 +146,9 @@ def _worker_fn(args):
     strat_sum  = {}
     rng        = random.Random(worker_id * 97651 + 42)
 
+    _report_every = max(50, n_iters // 200)   # ~200 flushes per worker
+    _local = 0
+
     for t in range(1, n_iters + 1):
         deck = list(range(DECK_SIZE))
         rng.shuffle(deck)
@@ -135,6 +157,15 @@ def _worker_fn(args):
             _cfr(h0, h1, _State(), tp,
                  regrets, strat_sum, t, rng,
                  heuristic, discard_sims)
+        _local += 1
+        if _local >= _report_every and _g_progress is not None:
+            with _g_lock:
+                _g_progress.value += _local
+            _local = 0
+
+    if _local > 0 and _g_progress is not None:
+        with _g_lock:
+            _g_progress.value += _local
 
     return strat_sum
 
@@ -200,7 +231,7 @@ def train(n_iters: int = 200_000, save_path: str = None,
 
 def _train_parallel(n_iters: int, save_path: str, discard_sims: int,
                     n_workers: int) -> Preflop:
-    from multiprocessing import Pool
+    from multiprocessing import Pool, Value, Lock
 
     iters_per = n_iters // n_workers
     remainder = n_iters - iters_per * n_workers
@@ -215,13 +246,28 @@ def _train_parallel(n_iters: int, save_path: str, discard_sims: int,
     # module and gym's deprecation warning fires only once.
     _get_eval()
 
-    results = []
-    with Pool(processes=n_workers) as pool:
-        with tqdm(total=n_workers, desc='preflop MCCFR', unit='worker', ncols=80) as bar:
-            for ss in pool.imap_unordered(_worker_fn, work):
-                results.append(ss)
-                bar.set_postfix(done=len(results), total_infosets=sum(len(s) for s in results))
-                bar.update(1)
+    progress  = Value(ctypes.c_int64, 0)
+    prog_lock = Lock()
+
+    with Pool(processes=n_workers,
+              initializer=_init_worker_progress,
+              initargs=(progress, prog_lock)) as pool:
+        async_results = [pool.apply_async(_worker_fn, (w,)) for w in work]
+
+        with tqdm(total=n_iters, desc='preflop MCCFR', ncols=80,
+                  unit='iter', unit_scale=True) as bar:
+            last = 0
+            while not all(r.ready() for r in async_results):
+                time.sleep(0.25)
+                curr = progress.value
+                if curr > last:
+                    bar.update(curr - last)
+                    last = curr
+            curr = progress.value
+            if curr > last:
+                bar.update(curr - last)
+
+        results = [r.get() for r in async_results]
 
     print(f'[parallel] merging {n_workers} strat_sum dicts ...')
     merged = _merge_strat_sums(results)

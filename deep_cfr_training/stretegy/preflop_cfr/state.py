@@ -31,7 +31,8 @@ class _State:
             return _State(self.bets, h, op, self.n_raises, done=(cp == 1))
         if a == 'c':
             nb = list(self.bets); nb[cp] = self.bets[op]
-            return _State(tuple(nb), h, op, self.n_raises, done=True)
+            bb_option = (cp == 0 and self.n_raises == 0)
+            return _State(tuple(nb), h, op, self.n_raises, done=not bb_option)
         if a == 'r':
             nb = list(self.bets)
             nb[cp] = min(_RAISE_SIZES[self.n_raises], MAX_BET)

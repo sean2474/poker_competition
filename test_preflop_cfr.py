@@ -57,6 +57,7 @@ class _EnvPlayer:
 
     def act(self, obs: dict) -> tuple:
         street = obs['street']
+        self._prev_street = street               # track street BEFORE our action
         valid  = obs['valid_actions']
         hand   = [c for c in obs['my_cards']        if c >= 0]
         board  = [c for c in obs['community_cards'] if c >= 0]
@@ -90,11 +91,11 @@ class _EnvPlayer:
         if at == DISCARD:
             if opp_d:
                 self.agent.observe_opp_discard(opp_d, board)
-        elif street == 0:
+        elif not opp_d:                            # opp hasn't discarded → preflop
             # Pass history BEFORE opponent's action, then append
             self.agent.observe_opp_preflop(ch, self._pf_hist)
             self._pf_hist += ch
-        else:
+        else:                                      # opp has discarded → postflop
             self.agent.observe_opp_postflop(ch, self._post_hist, board)
             self._post_hist += ch
 
