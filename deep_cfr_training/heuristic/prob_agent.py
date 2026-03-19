@@ -113,7 +113,7 @@ def _cards_seed(my_cards, community_cards, opp_discards):
     all_cards = sorted(c for c in list(my_cards) + list(community_cards) + list(opp_discards) if c >= 0)
     val = 0
     for i, c in enumerate(all_cards):
-        val ^= (c + 1) * (1000003 ** i)
+        val ^= int(c + 1) * (1000003 ** i)
     return val & 0xFFFFFFFF
 
 
