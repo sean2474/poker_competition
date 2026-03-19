@@ -10,10 +10,10 @@ import random
 import numpy as np
 from tqdm import tqdm
 
-from preflop_cfr.core  import Preflop
-from preflop_cfr.state import _State
-from preflop_cfr.utils import _SLOT, _match
-from game.game         import DECK_SIZE, canonicalize
+from .core   import Preflop
+from .state  import _State
+from .utils  import _SLOT, _match
+from game.game import DECK_SIZE, canonicalize
 
 
 # ── Evaluator (lazy, shared) ──────────────────────────────────────────────────

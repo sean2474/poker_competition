@@ -18,11 +18,12 @@ from game.game import (
 )
 from .state import _State
 from .utils import _cfr
+from interface.model import PreflopModel
 
 _SLOT     = {'f': 0, 'k': 1, 'c': 1, 'r': 2}
 _ALL_PAIR = [(i, j) for i in range(DECK_SIZE) for j in range(i + 1, DECK_SIZE)]
 
-class Preflop:
+class Preflop(PreflopModel):
     def __init__(self):
         self._regrets:   dict = {}     # key → np.ndarray(3) — CFR+ regrets
         self._strat_sum: dict = {}     # key → np.ndarray(3) — linear avg strategy
@@ -91,6 +92,17 @@ class Preflop:
         for key, ss in self._strat_sum.items():
             s = ss.sum()
             self._chart[key] = ss / s if s > 0 else np.full(3, 1. / 3)
+
+    # ── Training (CFR) ────────────────────────────────────────────────────────
+
+    def train(self, n_iters: int = 200_000, save_path: str = None,
+              discard_sims: int = 20, n_workers: int = 1, **kwargs):
+        from .train import train as _train_fn
+        result = _train_fn(n_iters=n_iters, save_path=save_path,
+                           discard_sims=discard_sims, n_workers=n_workers)
+        self._chart     = result._chart
+        self._regrets   = result._regrets
+        self._strat_sum = result._strat_sum
 
     # ── Save / Load ───────────────────────────────────────────────────────────
 

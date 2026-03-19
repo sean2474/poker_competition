@@ -11,12 +11,13 @@ from .utils import (
     build_features, calculate_ev,
     _ALL_PAIR, DECK_SIZE,
 )
+from interface.model import DiscardModel
 
 # All C(5,2)=10 ways to choose 2 indices from a 5-card hand
 _KEEP_COMBOS = list(itertools.combinations(range(5), 2))
 
 
-class Discard:
+class Discard(DiscardModel):
     def __init__(self):
         self._net: DiscardNet = None
 
@@ -30,6 +31,20 @@ class Discard:
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         torch.save(self._net.state_dict(), path)
         print(f'DiscardNet saved to {path}')
+
+    def train(self, preflop_model=None, n_episodes: int = 5_000,
+              n_epochs: int = 20, batch_size: int = 256,
+              lr: float = 1e-3, save_path: str = None, **kwargs):
+        from .train import train as _train_fn
+        self._net = _train_fn(
+            discard_model=self._net,
+            preflop_model=preflop_model,
+            n_episodes=n_episodes,
+            n_epochs=n_epochs,
+            batch_size=batch_size,
+            lr=lr,
+            save_path=save_path,
+        )
 
     def action(self, board: list, hand: list, history: str,
                hero_range: list, opp_range: list,
