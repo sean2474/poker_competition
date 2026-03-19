@@ -189,3 +189,5 @@ deep_cfr_training/test_weights*.npz
 deep_cfr_training/cpp/libtraversal.so
 deep_cfr_training/cpp/libtraversal.dylib
 deep_cfr_training/cpp/build/
+
+submission/model/*

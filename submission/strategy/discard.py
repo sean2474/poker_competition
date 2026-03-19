@@ -7,10 +7,10 @@ Feature assembly mirrors discard_cfr/features.py (44-dim NNUE).
 
 import numpy as np
 from features import (
-    classify_hand, compute_blocker_flags, card_rank,
-    KEEP_PAIRS, N_CATS, opp_range_cats as _opp_range_cats,
+    classify_hand, compute_blocker_flags,
+    KEEP_PAIRS, opp_range_cats as _opp_range_cats,
 )
-from action import DISCARD, DiscardNet
+from action import DISCARD
 
 # ── Feature builders (mirrors discard_cfr/features.py) ───────────────────────
 

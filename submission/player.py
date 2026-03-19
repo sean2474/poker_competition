@@ -13,8 +13,14 @@ Models loaded at init from model/:
 """
 
 import os
+import sys
 import pickle
 import torch
+
+# Ensure submission/ dir is on path so 'action', 'features', 'strategy.*' resolve
+_SUBMISSION_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SUBMISSION_DIR not in sys.path:
+    sys.path.insert(0, _SUBMISSION_DIR)
 
 from agents.agent import Agent
 from gym_env import PokerEnv
@@ -163,6 +169,9 @@ class PlayerAgent(Agent):
             return result
 
         # ── Postflop (flop/turn/river) ────────────────────────────────────────
+        # small_blind_player = hand_number % 2 (match.py),
+        # so player is BB when their id != hand_number % 2
+        is_bb = (self._my_id != self._hand_number % 2)
         return postflop_action(
             obs, self._strategy_net,
             my_id       = self._my_id,
@@ -172,6 +181,7 @@ class PlayerAgent(Agent):
             aggressor_opp = self._aggressor_opp,
             n_bets_me   = self._n_bets_me,
             n_bets_opp  = self._n_bets_opp,
+            is_bb       = is_bb,
         )
 
     def observe(self, observation, reward, terminated, truncated, info):

@@ -7,15 +7,16 @@ State tracking: aggressor, bet counts, to_call needed for 77-dim features.
 
 import numpy as np
 import torch
-from features import state_to_features, FEATURE_DIM
-from action import NUM_ACTIONS, map_training_action, valid_training_actions, FOLD, CALL, CHECK
+from features import state_to_features
+from action import NUM_ACTIONS, map_training_action, valid_training_actions
 
 
 def postflop_action(obs: dict, strategy_net,
                     my_id: int,
                     my_disc: list, opp_disc: list,
                     aggressor_me: bool, aggressor_opp: bool,
-                    n_bets_me: int, n_bets_opp: int) -> tuple:
+                    n_bets_me: int, n_bets_opp: int,
+                    is_bb: bool = False) -> tuple:
     """
     Returns (action_type, raise_amount, 0, 0) for postflop street.
 
@@ -24,9 +25,9 @@ def postflop_action(obs: dict, strategy_net,
     my_disc / opp_disc: [3] discard cards (-1 = unknown).
     aggressor_me/opp: who was last aggressor.
     n_bets_me/opp: bet counts this street.
+    is_bb: True if this agent is BB this hand (computed per-hand in player.py).
     """
     assert strategy_net is not None, 'strategy_net must be loaded'
-    v = obs['valid_actions']
 
     hand2  = [c for c in obs['my_cards'] if c >= 0][:2]
     comm   = list(obs.get('community_cards', [-1]*5))
@@ -34,7 +35,6 @@ def postflop_action(obs: dict, strategy_net,
     my_bet = int(obs.get('my_bet', 0))
     opp_bet= int(obs.get('opp_bet', 0))
     to_call = max(opp_bet - my_bet, 0)
-    is_bb  = (my_id == 1)
 
     assert len(hand2) == 2, f'Expected 2-card hand, got {len(hand2)}: {hand2}'
     comm5 = (comm + [-1]*5)[:5]
