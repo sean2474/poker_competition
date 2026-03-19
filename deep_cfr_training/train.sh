@@ -18,14 +18,14 @@ cd "$(dirname "$0")"
 export PYTHONPATH="$(dirname "$(pwd)"):$PYTHONPATH"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-PHASE="${1:-all}"
+PHASE="${1:-preflop}"
 COMPILE=true
 if [ "$1" = "--no-compile" ]; then
     COMPILE=false
     PHASE="${2:-all}"
 fi
 
-PREFLOP_ITERS="${PREFLOP_ITERS:-200000}"
+PREFLOP_ITERS="${PREFLOP_ITERS:-1000000}"
 DISCARD_HANDS="${DISCARD_HANDS:-5000}"
 DISCARD_EPOCHS="${DISCARD_EPOCHS:-100}"
 N_WORKERS="${N_WORKERS:-$(python3 -c 'import os; print(os.cpu_count())')}"
