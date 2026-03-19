@@ -101,8 +101,7 @@ def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
 
 def _worker_fn(args):
     """Run N iters of MCCFR independently. Returns strat_sum dict."""
-    import os, sys, warnings
-    warnings.filterwarnings('ignore')
+    import os, sys
     _this   = os.path.abspath(__file__)
     _cfr_dir  = os.path.dirname(os.path.dirname(_this))          # deep_cfr_training/
     _proj_dir = os.path.dirname(_cfr_dir)                        # project root (gym_env.py)
@@ -202,6 +201,10 @@ def _train_parallel(n_iters: int, save_path: str, discard_sims: int,
             for i in range(n_workers)]
 
     print(f'[parallel] {n_workers} workers × ~{iters_per} iters = {n_iters} total')
+
+    # Pre-warm evaluator in parent before forking so workers inherit the cached
+    # module and gym's deprecation warning fires only once.
+    _get_eval()
 
     results = []
     with Pool(processes=n_workers) as pool:
