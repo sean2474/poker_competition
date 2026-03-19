@@ -121,8 +121,7 @@ def _worker_fn(args):
     strat_sum  = {}
     rng        = random.Random(worker_id * 97651 + 42)
 
-    for t in tqdm(range(1, n_iters + 1), desc=f'worker {worker_id}',
-                  position=worker_id, leave=True, ncols=80):
+    for t in range(1, n_iters + 1):
         deck = list(range(DECK_SIZE))
         rng.shuffle(deck)
         h0, h1 = tuple(deck[:5]), tuple(deck[5:10])
@@ -203,8 +202,13 @@ def _train_parallel(n_iters: int, save_path: str, discard_sims: int,
 
     print(f'[parallel] {n_workers} workers × ~{iters_per} iters = {n_iters} total')
 
+    results = []
     with Pool(processes=n_workers) as pool:
-        results = pool.map(_worker_fn, work)
+        with tqdm(total=n_workers, desc='preflop MCCFR', unit='worker', ncols=80) as bar:
+            for ss in pool.imap_unordered(_worker_fn, work):
+                results.append(ss)
+                bar.set_postfix(done=len(results), total_infosets=sum(len(s) for s in results))
+                bar.update(1)
 
     print(f'[parallel] merging {n_workers} strat_sum dicts ...')
     merged = _merge_strat_sums(results)
