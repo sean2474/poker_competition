@@ -67,9 +67,13 @@ def _terminal(h0, h1, state, traverser, rng, heuristic, discard_sims):
 # ── CFR step ──────────────────────────────────────────────────────────────────
 
 def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
-         heuristic, discard_sims):
-    """External-sampling MCCFR step with self-play terminal values."""
+         heuristic, discard_sims, terminal_fn=None):
+    """External-sampling MCCFR step.
+    terminal_fn(h0, h1, state, traverser, rng) overrides default _terminal.
+    """
     if state.done:
+        if terminal_fn is not None:
+            return terminal_fn(h0, h1, state, traverser, rng)
         return _terminal(h0, h1, state, traverser, rng, heuristic, discard_sims)
 
     cp    = state.acting
@@ -85,7 +89,8 @@ def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
 
     if cp == traverser:
         vals = {a: _cfr(h0, h1, state.apply(a), traverser,
-                        regrets, strat_sum, t, rng, heuristic, discard_sims)
+                        regrets, strat_sum, t, rng, heuristic, discard_sims,
+                        terminal_fn)
                 for a in valid}
         ev = sum(strat[a] * vals[a] for a in valid)
         for a in valid:
@@ -94,7 +99,8 @@ def _cfr(h0, h1, state, traverser, regrets, strat_sum, t, rng,
     else:
         a_s = rng.choices(valid, weights=[strat[a] for a in valid])[0]
         return _cfr(h0, h1, state.apply(a_s), traverser,
-                    regrets, strat_sum, t, rng, heuristic, discard_sims)
+                    regrets, strat_sum, t, rng, heuristic, discard_sims,
+                    terminal_fn)
 
 
 # ── Parallel worker (module-level for multiprocessing spawn) ──────────────────
@@ -149,7 +155,8 @@ def _merge_strat_sums(results: list) -> dict:
 
 def train(n_iters: int = 200_000, save_path: str = None,
           discard_sims: int = 20, log_every: int = None,
-          n_workers: int = 1) -> Preflop:
+          n_workers: int = 1, terminal_fn=None,
+          init_regrets: dict = None, init_strat_sum: dict = None) -> Preflop:
     """
     Run external-sampling MCCFR for preflop.
 
@@ -168,6 +175,8 @@ def train(n_iters: int = 200_000, save_path: str = None,
     heuristic = get_heuristic_agent()
     rng = random.Random()
     p   = Preflop()
+    if init_regrets   is not None: p._regrets   = init_regrets
+    if init_strat_sum is not None: p._strat_sum = init_strat_sum
 
     with tqdm(range(1, n_iters + 1), desc='preflop MCCFR', ncols=80) as bar:
         for t in bar:
@@ -178,7 +187,7 @@ def train(n_iters: int = 200_000, save_path: str = None,
             for tp in [0, 1]:
                 _cfr(h0, h1, _State(), tp,
                      p._regrets, p._strat_sum, t, rng,
-                     heuristic, discard_sims)
+                     heuristic, discard_sims, terminal_fn)
 
             if t % max(1, n_iters // 20) == 0:
                 bar.set_postfix(infosets=len(p._strat_sum))

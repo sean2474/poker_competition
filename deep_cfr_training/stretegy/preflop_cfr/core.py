@@ -96,10 +96,16 @@ class Preflop(PreflopModel):
     # ── Training (CFR) ────────────────────────────────────────────────────────
 
     def train(self, n_iters: int = 200_000, save_path: str = None,
-              discard_sims: int = 20, n_workers: int = 1, **kwargs):
+              discard_sims: int = 20, n_workers: int = 1,
+              terminal_fn=None, **kwargs):
         from .train import train as _train_fn
-        result = _train_fn(n_iters=n_iters, save_path=save_path,
-                           discard_sims=discard_sims, n_workers=n_workers)
+        result = _train_fn(
+            n_iters=n_iters, save_path=save_path,
+            discard_sims=discard_sims, n_workers=n_workers,
+            terminal_fn=terminal_fn,
+            init_regrets=self._regrets   if self._regrets   else None,
+            init_strat_sum=self._strat_sum if self._strat_sum else None,
+        )
         self._chart     = result._chart
         self._regrets   = result._regrets
         self._strat_sum = result._strat_sum

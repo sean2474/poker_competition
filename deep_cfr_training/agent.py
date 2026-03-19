@@ -92,18 +92,21 @@ class Agent(AgentBase):
           'discard'  → joint preflop + discard alternating rounds
           'postflop' → joint preflop + discard + postflop (TBD)
         """
-        if phase == 'preflop' or phase == 'discard' or phase == 'postflop':
+        if phase == 'preflop':
             from training_phase.preflop import train as _train
             _train(self.preflop, **(preflop_kwargs or {}))
 
-        elif phase == 'discard' or phase == 'postflop':
+        elif phase == 'discard':
             from training_phase.discard import train as _train
             kw = discard_kwargs or {}
             kw.setdefault('preflop_save', None)
             kw.setdefault('discard_save', None)
             _train(self.preflop, self.discard, **kw)
 
-        elif phase == 'postflop' and self.postflop is not None:
+        elif phase == 'postflop':
             from training_phase.postflop import train as _train
             _train(self.preflop, self.discard, self.postflop,
                    **(postflop_kwargs or {}))
+            
+        else:
+            raise ValueError(f"Unknown phase: {phase}")
