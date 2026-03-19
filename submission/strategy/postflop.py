@@ -16,7 +16,8 @@ def postflop_action(obs: dict, strategy_net,
                     my_disc: list, opp_disc: list,
                     aggressor_me: bool, aggressor_opp: bool,
                     n_bets_me: int, n_bets_opp: int,
-                    is_bb: bool = False) -> tuple:
+                    is_bb: bool = False,
+                    opp_range_cats: np.ndarray = None) -> tuple:
     """
     Returns (action_type, raise_amount, 0, 0) for postflop street.
 
@@ -26,6 +27,7 @@ def postflop_action(obs: dict, strategy_net,
     aggressor_me/opp: who was last aggressor.
     n_bets_me/opp: bet counts this street.
     is_bb: True if this agent is BB this hand (computed per-hand in player.py).
+    opp_range_cats: 17-dim tracked opp range; overrides f[34-50] if provided.
     """
     assert strategy_net is not None, 'strategy_net must be loaded'
 
@@ -49,6 +51,9 @@ def postflop_action(obs: dict, strategy_net,
         n_bets_me=n_bets_me, n_bets_opp=n_bets_opp,
         aggressor_me=aggressor_me, aggressor_opp=aggressor_opp,
     )
+    # Override f[34:51] with Bayesian-tracked opp range when available
+    if opp_range_cats is not None:
+        feat[34:51] = opp_range_cats
 
     valid_t = valid_training_actions(obs)
     with torch.no_grad():
