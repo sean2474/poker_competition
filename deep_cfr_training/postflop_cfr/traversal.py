@@ -198,7 +198,99 @@ _KP_DISC = [[k for k in range(5) if k not in (ai, aj)]
              for ai, aj in [(i,j) for i in range(5) for j in range(i+1,5)]]
 
 
-def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
+_pf_opp_cats_cache = {}   # (hist, action_idx) -> 17-dim cats; computed once per training run
+
+
+def _precompute_preflop_opp_cats(strategy_sum) -> dict:
+    """
+    Precompute 17-dim opp_cats for each (hist, action_idx) preflop outcome.
+
+    For every C(27,5) 5-card hand:
+      P(action | hand, hist, size='s') from strategy_sum
+      best kept pair = argmin(category) over all 10 C(5,2) pairs at empty board
+      accumulate cats[best_pair_cat] += P(action | hand)
+
+    Result is stored in _pf_opp_cats_cache.
+    """
+    from itertools import combinations as _comb
+    from preflop_cfr.canonical import canonicalize as _canon
+    from game.features import classify_hand as _clsf
+
+    global _pf_opp_cats_cache
+    _PAIRS5 = [(i, j) for i in range(5) for j in range(i+1, 5)]
+    _HISTS  = ['', 'r', 'c', 'cb', 'rr']
+    _EMPTY  = [-1, -1, -1, -1, -1]
+    acc     = {(h, a): np.zeros(17, dtype=np.float64) for h in _HISTS for a in range(3)}
+    tot     = {(h, a): 0. for h in _HISTS for a in range(3)}
+
+    for hand5 in _comb(range(27), 5):
+        canon = _canon(list(hand5))
+        # Best kept pair by category (lower = stronger)
+        best_cat = 17
+        for ai, aj in _PAIRS5:
+            c = _clsf(hand5[ai], hand5[aj], _EMPTY, 0)
+            if c < best_cat:
+                best_cat = c
+        for hist in _HISTS:
+            key   = (canon, 's', hist)
+            strat = strategy_sum.get(key)
+            if strat is not None and strat.sum() > 0:
+                probs = strat / strat.sum()
+            else:
+                probs = np.full(3, 1.0 / 3)
+            for a in range(3):
+                acc[(hist, a)][best_cat] += probs[a]
+                tot[(hist, a)]           += probs[a]
+
+    for k in acc:
+        t = tot[k]
+        _pf_opp_cats_cache[k] = (acc[k] / t).astype(np.float32) if t > 0 else np.full(17, 1./17, np.float32)
+    return _pf_opp_cats_cache
+
+
+def _sample_pf_opp_cats_batch(p0h5, p1h5, strategy_sum, opp_cats_cache):
+    """
+    For each game i, sample preflop actions and return opp_cats arrays:
+      opp_cats_A[i] = E[BB's kept pair cats | BB's sampled preflop response]
+      opp_cats_B[i] = E[SB's kept pair cats | SB's sampled preflop action]
+    Both used in ctx_A / ctx_B for the DiscardNet.
+    """
+    from preflop_cfr.canonical import canonicalize as _canon
+    N   = len(p0h5)
+    rng = _rng
+    oA  = np.empty((N, 17), dtype=np.float32)
+    oB  = np.empty((N, 17), dtype=np.float32)
+
+    for i in range(N):
+        # ── SB (player 0) action from hist='' ────────────────────────────────
+        key_A = (_canon(list(p0h5[i])), 's', '')
+        s     = strategy_sum.get(key_A)
+        p_A   = (s / s.sum()) if s is not None and s.sum() > 0 else np.full(3, 1./3)
+        a_A   = int(rng.choice(3, p=p_A.astype(np.float64)))
+
+        # hist seen by BB depends on SB action
+        hist_B = 'r' if a_A == 2 else ('c' if a_A == 1 else None)
+
+        # ── BB (player 1) action ──────────────────────────────────────────────
+        if hist_B is None:   # SB folded — uniform fallback
+            a_B = 1          # doesn't matter
+            hist_B = 'r'     # fallback key
+        else:
+            key_B = (_canon(list(p1h5[i])), 's', hist_B)
+            s     = strategy_sum.get(key_B)
+            p_B   = (s / s.sum()) if s is not None and s.sum() > 0 else np.full(3, 1./3)
+            a_B   = int(rng.choice(3, p=p_B.astype(np.float64)))
+
+        # opp_cats for player A's discard = BB's range given BB's response
+        oA[i] = opp_cats_cache.get((hist_B, a_B), np.full(17, 1./17, np.float32))
+        # opp_cats for player B's discard = SB's range given SB's action
+        oB[i] = opp_cats_cache.get(('', a_A), np.full(17, 1./17, np.float32))
+
+    return oA, oB
+
+
+def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer,
+                                  opp_cats_A_batch=None, opp_cats_B_batch=None):
     """
     Phase 2/3: replace fast_discard with DiscardCFR choices.
 
@@ -239,7 +331,10 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
     # ── Step 3: build ctx for A (uniform opp cats — no dependency on B) ────────
     ctx_A = np.empty((N * 10, CTX_DIM), dtype=np.float32)
     ctx_A[:, :3]   = brs_rep
-    ctx_A[:, 3:20] = 1.0 / 17   # uniform opp cats
+    if opp_cats_A_batch is not None:
+        ctx_A[:, 3:20] = np.repeat(opp_cats_A_batch, 10, axis=0)
+    else:
+        ctx_A[:, 3:20] = 1.0 / 17   # fallback: uniform
     ctx_A[:, 20]   = 0.          # is_bb=False for player A
 
     # ── Step 4: NNUE pair embeddings for A and B in ONE GPU call ──────────────
@@ -286,7 +381,14 @@ def _recompute_discards_with_cfr(p0h5, p1h5, comms, discard_trainer):
         np.ascontiguousarray(p0d, dtype=np.int32).ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
         opp_cats_B.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
     )
-    opp_cats_B_rep = np.repeat(opp_cats_B, 10, axis=0)  # [N*10, 17]
+    # Combine discard-narrowed range with preflop-conditioned range (Bayesian product)
+    if opp_cats_B_batch is not None:
+        combined_B = opp_cats_B * opp_cats_B_batch          # element-wise Bayesian product
+        s = combined_B.sum(axis=1, keepdims=True)
+        combined_B = np.where(s > 1e-9, combined_B / s, opp_cats_B)  # fallback: discard-only
+        opp_cats_B_rep = np.repeat(combined_B, 10, axis=0)  # [N*10, 17]
+    else:
+        opp_cats_B_rep = np.repeat(opp_cats_B, 10, axis=0)  # [N*10, 17]
 
     # ── Step 7: build ctx for B with actual narrowed opp context ───────────────
     ctx_B = np.empty((N * 10, CTX_DIM), dtype=np.float32)
@@ -340,8 +442,18 @@ def run_traversals_batched(trainer, traversals_per_iter: int, traversing_player:
         # Phase 2/3: recompute discards with DiscardCFR so range features match.
         # run_iter is NOT called here to avoid 24× concurrent CPU inference.
         # It is called ONCE from the main training loop after all traversal threads finish.
+
+        # Precompute preflop opp_cats table on first call (cached globally).
+        if not _pf_opp_cats_cache:
+            _precompute_preflop_opp_cats(trainer.preflop_strategy_sum)
+
+        # Sample preflop actions per game → preflop-conditioned opp_cats.
+        opp_cats_A, opp_cats_B = _sample_pf_opp_cats_batch(
+            p0h5, p1h5, trainer.preflop_strategy_sum, _pf_opp_cats_cache)
+
         p0h, p1h, p0d, p1d = _recompute_discards_with_cfr(
-            p0h5, p1h5, comms, discard_trainer)
+            p0h5, p1h5, comms, discard_trainer,
+            opp_cats_A_batch=opp_cats_A, opp_cats_B_batch=opp_cats_B)
 
     is_warmup = not _postflop_ready(trainer)
 
